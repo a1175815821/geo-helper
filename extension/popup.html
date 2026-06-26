@@ -1,0 +1,61 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 320px; padding: 12px; font-family: "Microsoft YaHei", sans-serif; font-size: 13px; }
+  h3 { margin: 0 0 10px; font-size: 15px; }
+  label { display: block; margin: 8px 0 3px; color: #555; }
+  input, select { width: 100%; padding: 5px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 3px; }
+  .row { margin-bottom: 8px; }
+  button { padding: 6px 12px; background: #3273dc; color: #fff; border: none; border-radius: 3px; cursor: pointer; width: 100%; margin-top: 8px; }
+  button:hover { background: #2366c1; }
+  .hint { color: #888; font-size: 11px; margin-top: 4px; }
+  .toggle { display: flex; align-items: center; gap: 8px; }
+  .toggle input { width: auto; }
+</style>
+</head>
+<body>
+<h3>Geo Helper 配置</h3>
+
+<div class="row toggle">
+  <input type="checkbox" id="enabled" checked>
+  <label for="enabled" style="margin:0;">启用</label>
+</div>
+
+<div class="row">
+  <label>地图源</label>
+  <select id="mapSource">
+    <option value="">未配置</option>
+    <option value="1">高德 (需Key)</option>
+    <option value="0">OSM (需魔法)</option>
+  </select>
+</div>
+
+<div class="row">
+  <label>高德 Web 服务 Key (32位)</label>
+  <input type="text" id="amapKey" placeholder="高德地图API Key">
+</div>
+
+<div class="row">
+  <label>AI API BaseURL</label>
+  <input type="text" id="aiBase" placeholder="https://api.openai.com/v1">
+</div>
+
+<div class="row">
+  <label>AI API Key</label>
+  <input type="password" id="aiKey" placeholder="sk-xxx">
+</div>
+
+<div class="row">
+  <label>AI 模型名</label>
+  <input type="text" id="aiModel" placeholder="gpt-4o-mini">
+</div>
+
+<button id="save">保存</button>
+<div id="tip" style="margin-top:6px;font-size:12px;min-height:16px;"></div>
+<div class="hint">配置存储在 chrome.storage，图寻页面无法读取。悬浮窗默认隐藏，按 <b>Alt+H</b> 切换显示。</div>
+
+<script src="popup.js"></script>
+</body>
+</html>

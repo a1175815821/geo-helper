@@ -1,23 +1,34 @@
 {
   "manifest_version": 3,
   "name": "Geo Helper",
-  "version": "4.0",
+  "version": "5.0",
   "description": "地理信息展示工具",
-  "permissions": ["storage", "webRequest"],
+  "permissions": ["storage"],
   "host_permissions": [
     "*://tuxun.fun/*",
+    "*://*.tuxun.fun/*",
+    "*://*.chao-fan.com/*",
     "*://*.googleapis.com/*",
     "*://*.google.com/*",
     "*://restapi.amap.com/*",
     "*://nominatim.openstreetmap.org/*",
-    "*://mapsv0.bdimg.com/*",
-    "*://sv.map.qq.com/*"
+    "*://*.bdimg.com/*",
+    "*://*.map.qq.com/*"
   ],
   "background": { "service_worker": "background.js" },
-  "content_scripts": [{
-    "matches": ["*://tuxun.fun/*"],
-    "js": ["content.js"],
-    "run_at": "document_start"
-  }],
+  "content_scripts": [
+    {
+      "matches": ["*://tuxun.fun/*", "*://*.tuxun.fun/*"],
+      "js": ["content.js"],
+      "run_at": "document_start",
+      "world": "ISOLATED"
+    },
+    {
+      "matches": ["*://tuxun.fun/*", "*://*.tuxun.fun/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    }
+  ],
   "action": { "default_popup": "popup.html" }
 }

@@ -1,62 +1,91 @@
-// content.js - 注入到 tuxun.fun (V4)
-// 只负责显示悬浮窗，完全不碰网络（响应体由 background 用 webRequest 拦截）
-// 不 hook 任何原生 API，不发二次请求，心跳保活 SW
-// host 伪装成普通页面元素，规避 MutationObserver + elementFromPoint 检测
+// content.js - 注入到 tuxun.fun (V4.1)
+// 在页面内 hook fetch 拿街景响应体，发给 background 解析+调外部 API
+// 用 Proxy 伪装，clone() 读响应不影响游戏
+// 悬浮窗 Shadow DOM closed，host 伪装成普通隐藏元素
 
 (() => {
   'use strict';
 
   // ============== 悬浮窗（Shadow DOM closed）==============
   const host = document.createElement('div');
-  // 伪装成页面普通容器：不带 fixed/0x0/异常 z-index 特征
-  // 用 visibility:hidden + 绝对定位到视口外，不参与 hit-test
   host.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;overflow:hidden;visibility:hidden;pointer-events:none;';
   const sr = host.attachShadow({ mode: 'closed' });
   sr.innerHTML = `
     <style>
       :host { all: initial; }
       #box {
-        display: none;
         position: fixed; top: 12px; right: 12px;
-        width: 280px; padding: 10px 12px;
-        background: rgba(20,22,28,0.92); color: #e8e8e8;
+        width: 300px; padding: 14px 16px;
+        background: rgba(18,20,26,0.95); color: #e8e8e8;
         font-family: -apple-system, "Microsoft YaHei", sans-serif;
-        font-size: 12px; line-height: 1.5;
-        border-radius: 6px; box-shadow: 0 4px 16px rgba(0,0,0,0.4);
-        backdrop-filter: blur(8px);
+        font-size: 12px; line-height: 1.6;
+        border-radius: 8px;
+        box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.06);
+        backdrop-filter: blur(12px);
+        -webkit-backdrop-filter: blur(12px);
         cursor: move; user-select: none;
         z-index: 9999;
+        visibility: visible;
+        opacity: 0; transform: translateY(-8px) scale(0.98);
+        transition: opacity 0.18s ease, transform 0.18s ease;
+        pointer-events: none;
       }
-      #box.show { display: block; }
-      .h { color: #ffdd57; font-weight: 600; font-size: 13px; margin-bottom: 4px; }
-      .a { color: #00d1b2; font-weight: 600; margin-bottom: 3px; }
-      .r { color: #48c774; }
-      .d { color: #b86bff; margin-top: 3px; }
-      .l { color: #3273dc; margin-top: 4px; font-size: 11px; word-break: break-all; }
-      .s { color: #888; font-size: 11px; }
+      #box.show { opacity: 1; transform: translateY(0) scale(1); pointer-events: auto; }
+      #box.hide { opacity: 0; transform: translateY(-8px) scale(0.98); pointer-events: none; }
+      .row { display: flex; align-items: flex-start; gap: 8px; margin-bottom: 5px; }
+      .row:last-child { margin-bottom: 0; }
+      .ic { flex-shrink: 0; width: 14px; height: 14px; margin-top: 2px; opacity: 0.9; }
+      .ic svg { width: 100%; height: 100%; display: block; }
+      .tx { flex: 1; min-width: 0; word-break: break-word; }
+      .a .tx { color: #00d1b2; font-weight: 600; font-size: 13px; }
+      .h .tx { color: #ffdd57; font-weight: 600; font-size: 13px; }
+      .r .tx { color: #48c774; }
+      .d .tx { color: #b86bff; font-style: italic; }
+      .l .tx { color: #3273dc; font-size: 11px; }
+      .s .tx { color: #ccc; font-size: 12px; }
+      .row.hidden { display: none; }
+      .src { color: #666; font-size: 10px; margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 4px; }
+      .src.ai { color: #48c774; }
+      .src.local { color: #ffdd57; }
+      .src.err { color: #ff3860; }
+      .dot-ic { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
       #dot {
         position: fixed; top: 8px; right: 8px;
-        width: 6px; height: 6px; border-radius: 50%;
+        width: 8px; height: 8px; border-radius: 50%;
         background: #48c774; opacity: 0;
         pointer-events: none; z-index: 9999;
-        transition: opacity 0.2s;
+        transition: opacity 0.25s, transform 0.25s;
+        visibility: visible;
+        box-shadow: 0 0 8px rgba(72,199,116,0.6);
       }
-      #dot.show { opacity: 1; }
-      #dot.err { background: #ff3860; }
+      #dot.show { opacity: 1; transform: scale(1.2); }
+      #dot.err { background: #ff3860; box-shadow: 0 0 8px rgba(255,56,96,0.6); }
     </style>
     <div id="dot"></div>
     <div id="box">
-      <div class="s" id="status">等待中...</div>
-      <div class="a" id="addr"></div>
-      <div class="h" id="head"></div>
-      <div class="r" id="rough"></div>
-      <div class="d" id="desc"></div>
-      <div class="l" id="link"></div>
+      <div class="row s" id="status-row"><div class="ic" id="status-ic"></div><div class="tx" id="status">等待中...</div></div>
+      <div class="row a" id="addr-row"><div class="ic"></div><div class="tx" id="addr"></div></div>
+      <div class="row h" id="head-row"><div class="ic"></div><div class="tx" id="head"></div></div>
+      <div class="row r" id="rough-row"><div class="ic"></div><div class="tx" id="rough"></div></div>
+      <div class="row d" id="desc-row"><div class="ic"></div><div class="tx" id="desc"></div></div>
+      <div class="row l" id="link-row"><div class="ic"></div><div class="tx" id="link"></div></div>
+      <div class="src" id="src"></div>
     </div>
   `;
-  // document_start 时 documentElement 已存在，立即挂载
-  // 伪装成 head 之前的占位元素，不引发可疑的 fixed/0x0 特征
-  document.documentElement.appendChild(host);
+  // 挂载 host，双保险：document_start 时 documentElement 可能未就绪
+  function mountHost() {
+    try {
+      (document.body || document.documentElement).appendChild(host);
+      console.log('[Geo Helper] host 挂载成功, parent:', host.parentElement?.tagName || '无');
+      return true;
+    } catch (e) {
+      console.log('[Geo Helper] host 挂载失败:', e.message);
+      return false;
+    }
+  }
+  if (!mountHost()) {
+    document.addEventListener('DOMContentLoaded', () => mountHost(), { once: true });
+  }
 
   const box = sr.getElementById('box');
   const dot = sr.getElementById('dot');
@@ -64,24 +93,49 @@
   const elAddr = sr.getElementById('addr');
   const elHead = sr.getElementById('head');
   const elRough = sr.getElementById('rough');
+
+  // SVG 图标库（替代 emoji，避免字体不支持）—— 必须在使用前定义
+  const ICONS = {
+    addr: '<svg viewBox="0 0 24 24" fill="none" stroke="#00d1b2" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
+    globe: '<svg viewBox="0 0 24 24" fill="none" stroke="#ffdd57" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
+    pin: '<svg viewBox="0 0 24 24" fill="none" stroke="#48c774" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
+    spark: '<svg viewBox="0 0 24 24" fill="none" stroke="#b86bff" stroke-width="2"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/></svg>',
+    map: '<svg viewBox="0 0 24 24" fill="none" stroke="#3273dc" stroke-width="2"><polygon points="1 6 1 22 8 18 16 22 23 18 23 2 16 6 8 2 1 6"/><line x1="8" y1="2" x2="8" y2="18"/><line x1="16" y1="6" x2="16" y2="22"/></svg>',
+    clock: '<svg viewBox="0 0 24 24" fill="none" stroke="#888" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>',
+    check: '<svg viewBox="0 0 24 24" fill="none" stroke="#48c774" stroke-width="2.5"><polyline points="20 6 9 17 4 12"/></svg>',
+    warn: '<svg viewBox="0 0 24 24" fill="none" stroke="#ffdd57" stroke-width="2"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
+    cross: '<svg viewBox="0 0 24 24" fill="none" stroke="#ff3860" stroke-width="2.5"><line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/></svg>'
+  };
+  function setIcon(rowId, iconKey) {
+    const ic = sr.querySelector('#' + rowId + ' .ic');
+    if (ic) ic.innerHTML = ICONS[iconKey] || '';
+  }
   const elDesc = sr.getElementById('desc');
   const elLink = sr.getElementById('link');
+  const elSrc = sr.getElementById('src');
 
   // ============== 显示/隐藏切换 ==============
-  let visible = false;
+  let visible = true; // 默认显示
+  box.classList.add('show');
   function toggle() {
     visible = !visible;
-    box.classList.toggle('show', visible);
+    if (visible) {
+      box.classList.remove('hide');
+      box.classList.add('show');
+    } else {
+      box.classList.remove('show');
+      box.classList.add('hide');
+    }
   }
-  // Alt+H 切换（避开 F8 调试冲突、Ctrl+` 输入法冲突）
+  // F8 切换
   document.addEventListener('keydown', (e) => {
-    if (e.altKey && (e.key === 'h' || e.key === 'H')) {
+    if (e.key === 'F8') {
       e.preventDefault();
       toggle();
     }
   }, true);
 
-  // ============== 拖动（pointer events，仅拖动期间注册 move/up）==============
+  // ============== 拖动 ==============
   let dragging = false, dx = 0, dy = 0;
   const onMove = (e) => {
     if (!dragging) return;
@@ -104,33 +158,80 @@
 
   // ============== 心跳保活 SW ==============
   setInterval(() => {
-    chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
+    try {
+      if (chrome.runtime?.id) {
+        chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
+      }
+    } catch {}
   }, 25000);
 
   // ============== 接收 background 推送 ==============
-  chrome.runtime.onMessage.addListener((msg) => {
+  console.log('[Geo Helper] content.js 注册 onMessage 监听器');
+  // 初始等待状态显示时钟图标
+  setIcon('status-row', 'clock');
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    console.log('[Geo Helper] content.js 收到消息:', msg?.type, msg);
     if (msg.type !== 'result') return;
     if (msg.data) {
+      console.log('[Geo Helper] 渲染数据:', msg.data);
       render(msg.data);
       dot.classList.remove('err');
       dot.classList.add('show');
       setTimeout(() => dot.classList.remove('show'), 2000);
     } else {
+      sr.getElementById('status-row').classList.remove('hidden');
       elStatus.textContent = msg.error || '未识别到坐标';
+      setIcon('status-row', 'warn');
       dot.classList.add('err', 'show');
       setTimeout(() => dot.classList.remove('show'), 3000);
     }
   });
 
   function render(d) {
-    elStatus.textContent = '';
+    // 有结果后隐藏"等待中..."整行
+    sr.getElementById('status-row').classList.add('hidden');
     elAddr.textContent = d.addr + (d.panoName ? ` (${d.panoName})` : '');
+    setIcon('addr-row', 'addr');
     if (d.info) {
       const head = [d.info.continent, d.info.country, d.info.dir].filter(Boolean).join('  |  ');
       elHead.textContent = head;
       elRough.textContent = d.info.rough || '';
       elDesc.textContent = d.info.desc || '';
+      setIcon('head-row', 'globe');
+      setIcon('rough-row', 'pin');
+      setIcon('desc-row', 'spark');
     }
-    elLink.textContent = `Google Maps: @${d.coord.lat},${d.coord.lng},6z`;
+    // 显式拼接，避免负经度导致视觉上缺逗号
+    const lat = Number(d.coord.lat).toFixed(6);
+    const lng = Number(d.coord.lng).toFixed(6);
+    elLink.textContent = `Google Maps: @${lat},${lng},6z`;
+    setIcon('link-row', 'map');
+    // AI 状态指示
+    elSrc.className = 'src';
+    const srcMap = {
+      'ai': { cls: 'ai', icon: 'check', text: 'AI 解析' },
+      'local': { cls: 'local', icon: 'warn', text: '本地降级 (AI 未配置或失败)' },
+      'local(timeout)': { cls: 'local', icon: 'warn', text: '本地降级 (AI 超时)' },
+      'none': { cls: 'err', icon: 'cross', text: '无信息源' }
+    };
+    const s = srcMap[d.aiSource] || { cls: 'err', icon: 'cross', text: '未知: ' + d.aiSource };
+    elSrc.classList.add(s.cls);
+    elSrc.innerHTML = `<span class="dot-ic"></span>${s.text}`;
   }
+
+  // ============== 监听 page world (inject.js) 发来的响应体 ==============
+  // inject.js 在 MAIN world hook fetch，通过 CustomEvent 传回响应体
+  console.log('[Geo Helper] content.js 已加载, 监听 __geo_body__ 事件');
+  window.addEventListener('__geo_body__', (e) => {
+    console.log('[Geo Helper] content.js 收到 __geo_body__ 事件');
+    try {
+      const { url, body } = e.detail;
+      chrome.runtime.sendMessage({ type: 'streetview', url, body }).catch((err) => {
+        console.log('[Geo Helper] 发送给 background 失败:', err);
+      });
+      console.log('[Geo Helper] 已转发给 background');
+    } catch (err) {
+      console.log('[Geo Helper] 处理事件异常:', err);
+    }
+  });
 })();

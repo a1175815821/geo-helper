@@ -1,6 +1,6 @@
 # Geo Helper
 
-图寻（[tuxun.fun](https://tuxun.fun)）街景坐标解析与地理信息展示浏览器扩展。基于 Chrome Manifest V3，通过 `chrome.webRequest` 拦截街景元数据响应体，解析真实坐标后展示洲/国家/方位/详细位置/特征描述，辅助玩家识别位置。
+图寻（[tuxun.fun](https://tuxun.fun)）街景坐标解析与地理信息展示浏览器扩展。基于 Chrome Manifest V3，通过页面内 fetch/XHR hook + CustomEvent 跨 world 通信，在 Shadow DOM 悬浮窗中展示洲/国家/方位/详细位置/特征描述，辅助玩家识别位置。
 
 > **免责声明**：本项目仅供学习和研究用途。使用本工具违反图寻用户协议，账号有被封禁的风险。作者不对任何因使用本工具导致的后果负责。请自行评估风险。
 
@@ -8,23 +8,25 @@
 
 ## 功能特性
 
-- **零二次请求**：通过 `chrome.webRequest.filterResponseData` 拦截原始响应体，透传不改，服务端只看到一次请求
-- **零原型污染**：不 hook `XMLHttpRequest`、`fetch` 等原生 API，不修改页面全局对象
-- **零控制台输出**：不依赖 F12，不调用 `console.clear`，所有信息显示在 Shadow DOM 悬浮窗
+- **跨 world 通信架构**：`inject.js`（MAIN world）hook fetch/XHR 拿响应体，通过 `CustomEvent` 传给 `content.js`（ISOLATED world），再转发 background 处理
 - **零页面存储**：配置存储在 `chrome.storage.sync`，图寻页面 JS 无法读取
 - **零外部请求泄露**：所有外部 API（高德/OSM/AI）由 service worker 发起，页面 Network 面板看不到
 - **Shadow DOM closed**：悬浮窗内部节点对页面 JS 不可访问
 - **host 元素伪装**：悬浮窗宿主元素伪装成普通隐藏容器，规避 MutationObserver 和 `elementFromPoint` 检测
-- **AI 增强**：接入 OpenAI 兼容接口，输出中文洲/国家/八方位/特征描述，本地降级兜底
+- **AI 增强**：接入 OpenAI 兼容接口（支持 LongCat/DeepSeek-R1 等非标准 `reasoning_content` 字段），输出中文洲/国家/八方位/特征描述，本地降级兜底
 - **心跳保活**：content script 每 25 秒 ping service worker，避免 MV3 30 秒终止
 - **并发去抖**：同一标签 500ms 内多次结果只推最后一次，避免悬浮窗闪烁
 - **配置校验**：高德 Key 32 位校验、AI BaseURL 协议校验、AI Key 格式校验
+- **AI 状态指示**：悬浮窗底部显示信息来源（AI 解析/本地降级/超时降级），颜色区分
+- **SVG 图标**：所有图标用内联 SVG，不依赖 emoji 字体
+- **平滑动画**：显示/隐藏淡入淡出 + 位移缩放，不花哨
+- **递归解析**：Google grpc-web 响应用递归搜索 `[null, null, lat, lng]` 格式，不依赖固定下标
 
 ## 支持的街景源
 
 | 源 | 接口 | 坐标系 |
 |---|---|---|
-| Google Street View | `GetMetadata` | WGS-84 |
+| Google Street View | `GetMetadata`（经 `tile.chao-fan.com` 代理） | WGS-84 |
 | 百度街景 | `getPanoInfo` | BD-09 |
 | 腾讯街景 | `getQQPanoInfo` | GCJ-02 |
 
@@ -147,10 +149,23 @@ Google Maps: @30.2,120.1,6z
 
 ## 版本历史
 
+### v5.0（当前正式版）
+
+- 架构重构：移除 `webRequest.filterResponseData`（Firefox 独占，Chrome 不支持）
+- 新架构：`inject.js`（MAIN world）hook fetch/XHR + `CustomEvent` 跨 world 通信
+- 兼容图寻代理：拦截 `tile.chao-fan.com` 的 Google GetMetadata 请求
+- 递归解析：Google grpc-web 响应用递归搜索 `[null, null, lat, lng]`，不依赖固定下标
+- AI 兼容：支持 LongCat/DeepSeek-R1 等非标准 `reasoning_content` 字段
+- AI 状态指示：悬浮窗底部显示信息来源
+- SVG 图标：替代 emoji，避免字体不支持
+- 平滑动画：淡入淡出 + 位移缩放
+- 国家名标准化：处理 `Éire / Ireland` 等本地语+英语混合，自动中文化
+- host 挂载双保险：document_start 失败时 DOMContentLoaded 兜底
+
 ### v4.0
 
 - 架构升级：Chrome MV3 扩展
-- 零二次请求：`webRequest.filterResponseData` 拦截响应体
+- 零二次请求：`webRequest.filterResponseData` 拦截响应体（注：Chrome 不支持，已在 v5.0 重构）
 - 零原型污染：不 hook 任何原生 API
 - Shadow DOM closed 悬浮窗
 - host 元素伪装，规避 MutationObserver
@@ -164,8 +179,9 @@ Google Maps: @30.2,120.1,6z
 .
 ├── extension/          # Chrome MV3 扩展
 │   ├── manifest.json
-│   ├── background.js   # service worker，网络拦截与外部请求
-│   ├── content.js      # content script，悬浮窗显示
+│   ├── background.js   # service worker，解析响应体与外部 API 调用
+│   ├── content.js      # content script (ISOLATED)，悬浮窗显示与消息转发
+│   ├── inject.js       # content script (MAIN)，hook fetch/XHR 拿响应体
 │   ├── popup.html      # 配置界面
 │   └── popup.js        # 配置逻辑与校验
 ├── LICENSE

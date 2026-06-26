@@ -1,5 +1,6 @@
 // background.js - service worker
-// 所有外部请求在此发起，页面 CSP 和反作弊脚本无法检测
+// 只负责外部 API 调用（高德/OSM/AI），不碰网络拦截
+// 响应体由 content.js 在页面内 hook fetch 拿到后发过来
 
 const CFG_DEFAULTS = {
   enabled: true,
@@ -15,89 +16,144 @@ async function cfg() {
 }
 
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-  // 心跳：content 定期 ping，保活 SW，避免长 AI 请求期间被终止
   if (msg.type === 'ping') { sendResponse({ ok: true }); return true; }
+  // content 拿到街景响应体后发来 url + body，由 background 解析+调外部 API
+  if (msg.type === 'streetview') {
+    console.log('[BG] 收到 streetview 消息, url:', msg.url, 'body 长度:', msg.body?.length);
+    handleBody(msg.url, msg.body, sender.tab?.id).catch((e) => console.log('[BG] handleBody 异常:', e));
+    sendResponse({ ok: true });
+    return true;
+  }
   sendResponse(null);
   return true;
 });
 
-// ============== webRequest 拦截响应体（零二次请求、零原型污染）==============
-// 用 filterResponseData 在 onBeforeRequest 里挂 StreamFilter，
-// 收集原始响应体后透传给页面，自己只读不改。
-const TARGET_RE = /GetMetadata|getPanoInfo|getQQPanoInfo/;
+// ============== Google GetMetadata 递归解析 ==============
+// Google grpc-web 响应是嵌套数组，坐标格式固定为 [null, null, lat, lng]
+// panoId 格式为 [2, "base64url字符串"]
+function searchGoogleMetadata(node) {
+  const result = { coord: null, pano: null, str: '' };
+  const panoRe = /^[A-Za-z0-9_-]{16,40}$/;
+  const visited = new WeakSet();
 
-// 并发去重：同一 tab 短时间内的多个目标请求只推送最后一次结果
-const pendingTabs = new Map(); // tabId -> setTimeout id
+  function walk(n) {
+    if (result.coord && result.pano) return;
+    if (typeof n !== 'object' || n === null) return;
+    if (visited.has(n)) return;
+    visited.add(n);
 
-chrome.webRequest.onBeforeRequest.addListener(
-  (details) => {
-    if (!TARGET_RE.test(details.url)) return;
-    const filter = chrome.webRequest.filterResponseData(details.requestId);
-    const chunks = [];
-    filter.ondata = (e) => {
-      // try-catch 保证异常时仍透传，避免截断街景响应
-      try { chunks.push(e.data); } catch {}
-      try { filter.write(e.data); } catch {}
-    };
-    filter.onstop = async () => {
-      filter.disconnect();
-      let result = null, errMsg = null;
-      try {
-        const blob = new Blob(chunks);
-        const body = await blob.text();
-        const c = await cfg();
-        if (c.enabled === false) return;
-        // AI 调用加 20 秒超时，避免 SW 等待过久被终止
-        result = await Promise.race([
-          handleBody(details.url, body, c),
-          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))
-        ]);
-        if (!result) errMsg = '未识别到坐标';
-      } catch (e) {
-        errMsg = e.message === 'timeout' ? 'AI 请求超时，已降级' : '处理失败: ' + e.message;
-        if (e.message === 'timeout') {
-          try {
-            const blob = new Blob(chunks);
-            const body = await blob.text();
-            const c = await cfg();
-            result = await handleBody(details.url, body, c, true);
-          } catch {}
+    if (Array.isArray(n)) {
+      // 优先匹配坐标：[null, null, lat, lng] 格式
+      // lat/lng 必须是浮点数（含小数点），范围 -90~90 / -180~180
+      if (n.length >= 4 && n[0] === null && n[1] === null
+          && typeof n[2] === 'number' && typeof n[3] === 'number'
+          && n[2] >= -90 && n[2] <= 90 && n[3] >= -180 && n[3] <= 180
+          && (!Number.isInteger(n[2]) || !Number.isInteger(n[3]))) {
+        if (!result.coord) {
+          result.coord = { lat: n[2], lng: n[3] };
         }
       }
-      // 直接用 details.tabId 推送，无需 tabs 权限
-      const tabId = details.tabId;
-      if (tabId < 0) return; // 非页面发起的请求
-      // 去抖：同一 tab 500ms 内的多次结果只推最后一次
-      if (pendingTabs.has(tabId)) clearTimeout(pendingTabs.get(tabId));
-      pendingTabs.set(tabId, setTimeout(() => {
-        pendingTabs.delete(tabId);
-        const payload = result
-          ? { type: 'result', data: result }
-          : { type: 'result', data: null, error: errMsg };
-        chrome.tabs.sendMessage(tabId, payload).catch(() => {});
-      }, 500));
-    };
-    filter.onerror = () => { try { filter.disconnect(); } catch {} };
-  },
-  { urls: ["*://*.googleapis.com/*", "*://*.google.com/*", "*://tuxun.fun/*", "*://*.bdimg.com/*", "*://sv.map.qq.com/*"] }
-);
+      // 匹配 panoId：[2, "string"]
+      if (n.length === 2 && n[0] === 2 && typeof n[1] === 'string') {
+        if (!result.pano && panoRe.test(n[1])) {
+          result.pano = n[1];
+        }
+      }
+      // 匹配地名：[null, null, [["地名","zh"]]]
+      if (n.length === 3 && n[0] === null && n[1] === null && Array.isArray(n[2])) {
+        try {
+          const inner = n[2][0];
+          if (Array.isArray(inner) && typeof inner[0] === 'string' && inner[1] === 'zh') {
+            if (!result.str) result.str = inner[0];
+          }
+        } catch (e) {}
+      }
+      for (const item of n) walk(item);
+    } else {
+      for (const k of Object.keys(n)) walk(n[k]);
+    }
+  }
+  walk(node);
+  return (result.coord && result.pano) ? result : null;
+}
 
 // ============== 响应体解析 ==============
-// skipAI=true 时跳过 AI，直接走本地降级（用于 AI 超时兜底）
-async function handleBody(url, body, c, skipAI = false) {
+async function handleBody(url, body, tabId) {
+  try {
+    const c = await cfg();
+    if (c.enabled === false) return;
+    const result = await Promise.race([
+      parseAndEnrich(url, body, c),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))
+    ]);
+    if (!result) {
+      push(tabId, null, '未识别到坐标');
+      return;
+    }
+    push(tabId, result);
+  } catch (e) {
+    const errMsg = e.message === 'timeout' ? 'AI 请求超时，已降级' : '处理失败: ' + e.message;
+    // 超时降级
+    if (e.message === 'timeout') {
+      try {
+        const c = await cfg();
+        const r = await parseAndEnrich(url, body, c, true);
+        if (r) { push(tabId, r); return; }
+      } catch {}
+    }
+    push(tabId, null, errMsg);
+  }
+}
+
+function push(tabId, result, errMsg) {
+  if (!tabId || tabId < 0) {
+    console.log('[BG] push 跳过: tabId 无效', tabId);
+    return;
+  }
+  const payload = result
+    ? { type: 'result', data: result }
+    : { type: 'result', data: null, error: errMsg };
+  console.log('[BG] 推送到 tab', tabId, 'payload:', result ? `lat=${result.coord?.lat} lng=${result.coord?.lng}` : errMsg);
+  chrome.tabs.sendMessage(tabId, payload).then(() => {
+    console.log('[BG] 推送成功');
+  }).catch((e) => {
+    console.log('[BG] 推送失败:', e.message);
+  });
+}
+
+async function parseAndEnrich(url, body, c, skipAI = false) {
   let coord = null, pano = null, source = null, str = '';
 
   if (url.includes('GetMetadata')) {
     try {
       let txt = body;
       if (txt.startsWith(")]}'")) txt = txt.slice(4);
-      const d = JSON.parse(txt);
-      const m = d[1][0];
-      coord = { lat: m[5][0][1][0][2], lng: m[5][0][1][0][3] };
-      pano = m[1][1];
-      source = 'g';
-      str = (m[3][2][0] && m[3][2][0][0]) || '';
-    } catch (e) { return null; }
+      let d;
+      try {
+        d = JSON.parse(txt);
+      } catch {
+        const code0 = txt.charCodeAt(0);
+        if (code0 === 0 || code0 === 1) {
+          d = JSON.parse(txt.slice(5));
+        } else {
+          throw new Error('not json');
+        }
+      }
+      console.log('[BG] GetMetadata 顶层结构:', JSON.stringify(d).slice(0, 300));
+      const found = searchGoogleMetadata(d);
+      if (found) {
+        coord = found.coord;
+        pano = found.pano;
+        source = 'g';
+        str = found.str || '';
+        console.log('[BG] 解析成功:', coord, 'pano:', pano);
+      } else {
+        console.log('[BG] 递归搜索未找到坐标');
+      }
+    } catch (e) {
+      console.log('[BG] GetMetadata 解析失败:', e.message, 'body 前 200 字节:', body.slice(0, 200));
+      return null;
+    }
   } else if (/getPanoInfo|getQQPanoInfo/.test(url)) {
     try {
       const d = JSON.parse(body);
@@ -125,17 +181,26 @@ async function handleBody(url, body, c, skipAI = false) {
   }
 
   let info = null;
+  let aiSource = 'none';
   if (!skipAI) {
     info = await aiInfo(coord.lat, coord.lng, { p: source, g, r: addr }, c);
+    if (info) aiSource = 'ai';
   }
-  if (!info) info = await localInfo(coord.lat, coord.lng);
+  if (!info) {
+    info = await localInfo(coord.lat, coord.lng);
+    if (info) aiSource = skipAI ? 'local(timeout)' : 'local';
+  }
 
-  return { coord, addr, panoName: g, info };
+  return { coord, addr, panoName: g, info, aiSource };
 }
 
 // ============== AI ==============
 async function aiInfo(lat, lng, raw, c) {
-  if (!c.aiBase || !c.aiKey) return null;
+  if (!c.aiBase || !c.aiKey) {
+    console.log('[BG] AI 跳过: 配置缺失, aiBase:', c.aiBase || '(空)', 'aiKey:', c.aiKey ? '(有)' : '(空)');
+    return null;
+  }
+  console.log('[BG] AI 调用开始, base:', c.aiBase, 'model:', c.aiModel);
   const prompt = `你是地理助手。根据坐标和原始信息，用中文给出结构化结果。
 
 坐标：${lat}, ${lng}
@@ -152,7 +217,9 @@ async function aiInfo(lat, lng, raw, c) {
   "desc": "一句话特征描述（帮助玩家识别，如'沙漠中的小镇''海边港口''阿尔卑斯山区'，不超过20字）"
 }`;
   try {
-    const r = await fetch(`${c.aiBase.replace(/\/+$/, '')}/chat/completions`, {
+    const url = `${c.aiBase.replace(/\/+$/, '')}/chat/completions`;
+    console.log('[BG] AI 请求 URL:', url);
+    const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${c.aiKey}` },
       body: JSON.stringify({
@@ -162,14 +229,34 @@ async function aiInfo(lat, lng, raw, c) {
         response_format: { type: 'json_object' }
       })
     });
-    if (!r.ok) return null;
+    console.log('[BG] AI 响应状态:', r.status, r.statusText);
+    if (!r.ok) {
+      const errText = await r.text().catch(() => '(无法读取错误体)');
+      console.log('[BG] AI 失败, 响应体:', errText.slice(0, 300));
+      return null;
+    }
     const d = await r.json();
-    const txt = d?.choices?.[0]?.message?.content;
-    if (!txt) return null;
+    console.log('[BG] AI 响应 JSON:', JSON.stringify(d).slice(0, 300));
+    // 兼容非标准字段：LongCat 用 reasoning_content，DeepSeek-R1 用 reasoning_content
+    const msg = d?.choices?.[0]?.message;
+    const txt = msg?.content || msg?.reasoning_content || msg?.text || '';
+    if (!txt) {
+      console.log('[BG] AI 返回内容为空, 完整响应:', JSON.stringify(d).slice(0, 500));
+      return null;
+    }
+    console.log('[BG] AI 返回文本:', txt.slice(0, 200));
     const m = txt.match(/\{[\s\S]*\}/);
-    if (!m) return null;
-    return JSON.parse(m[0]);
-  } catch { return null; }
+    if (!m) {
+      console.log('[BG] AI 返回不是 JSON');
+      return null;
+    }
+    const parsed = JSON.parse(m[0]);
+    console.log('[BG] AI 解析成功:', parsed);
+    return parsed;
+  } catch (e) {
+    console.log('[BG] AI 异常:', e.message, e.stack);
+    return null;
+  }
 }
 
 // ============== 地理服务 ==============
@@ -205,7 +292,6 @@ async function qqName(id) {
   try {
     const r = await fetch(`https://sv.map.qq.com/sv?svid=${id}&output=json`);
     const buf = await r.arrayBuffer();
-    // TextDecoder 在 service worker 中可用，且支持 GBK
     const txt = new TextDecoder('GBK').decode(buf);
     const j = JSON.parse(txt);
     return j?.detail?.basic?.append_addr || '';
@@ -217,13 +303,14 @@ const CC = {
   '中国':'亚洲','China':'亚洲','日本':'亚洲','Japan':'亚洲','韩国':'亚洲','South Korea':'亚洲','越南':'亚洲','Vietnam':'亚洲',
   '泰国':'亚洲','Thailand':'亚洲','印度':'亚洲','India':'亚洲','印度尼西亚':'亚洲','Indonesia':'亚洲','菲律宾':'亚洲','Philippines':'亚洲',
   '马来西亚':'亚洲','Malaysia':'亚洲','新加坡':'亚洲','Singapore':'亚洲','伊朗':'亚洲','Iran':'亚洲','沙特阿拉伯':'亚洲','Saudi Arabia':'亚洲',
-  '土耳其':'亚洲/欧洲','Turkey':'亚洲/欧洲','俄罗斯':'欧洲/亚洲','Russia':'欧洲/亚洲',
+  '土耳其':'亚洲/欧洲','Turkey':'亚洲/欧洲','Türkiye':'亚洲/欧洲','俄罗斯':'欧洲/亚洲','Russia':'欧洲/亚洲',
   '美国':'北美洲','United States':'北美洲','USA':'北美洲','加拿大':'北美洲','Canada':'北美洲','墨西哥':'北美洲','Mexico':'北美洲',
   '巴西':'南美洲','Brazil':'南美洲','阿根廷':'南美洲','Argentina':'南美洲','智利':'南美洲','Chile':'南美洲','哥伦比亚':'南美洲','Colombia':'南美洲',
   '秘鲁':'南美洲','Peru':'南美洲','英国':'欧洲','United Kingdom':'欧洲','U.K.':'欧洲','法国':'欧洲','France':'欧洲',
   '德国':'欧洲','Germany':'欧洲','意大利':'欧洲','Italy':'欧洲','西班牙':'欧洲','Spain':'欧洲','葡萄牙':'欧洲','Portugal':'欧洲',
   '荷兰':'欧洲','Netherlands':'欧洲','瑞士':'欧洲','Switzerland':'欧洲','波兰':'欧洲','Poland':'欧洲','瑞典':'欧洲','Sweden':'欧洲',
   '挪威':'欧洲','Norway':'欧洲','芬兰':'欧洲','Finland':'欧洲','希腊':'欧洲','Greece':'欧洲','乌克兰':'欧洲','Ukraine':'欧洲',
+  '爱尔兰':'欧洲','Ireland':'欧洲','Éire':'欧洲','Éire / Ireland':'欧洲','Eire / Ireland':'欧洲','Eire/Ireland':'欧洲',
   '澳大利亚':'大洋洲','Australia':'大洋洲','新西兰':'大洋洲','New Zealand':'大洋洲',
   '埃及':'非洲','Egypt':'非洲','南非':'非洲','South Africa':'非洲','尼日利亚':'非洲','Nigeria':'非洲','肯尼亚':'非洲','Kenya':'非洲',
   '摩洛哥':'非洲','Morocco':'非洲','阿尔及利亚':'非洲','Algeria':'非洲','塞内加尔':'非洲','Senegal':'非洲','埃塞俄比亚':'非洲','Ethiopia':'非洲'
@@ -267,10 +354,26 @@ async function localInfo(lat, lng) {
     const d = await r.json();
     if (!d || !d.display_name) return null;
     const parts = d.display_name.split(',').map(s => s.trim()).filter(Boolean);
-    const country = parts[parts.length - 1] || '';
-    const continent = CC[country] || '未知';
+    let country = parts[parts.length - 1] || '';
+    // 国家名标准化：处理 "Éire / Ireland" 这类本地语+英语混合
+    // 1. 去重音
+    const normalized = country.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+    // 2. 如果含 /，取最后一段（通常是英语名）
+    if (normalized.includes('/')) {
+      const segs = normalized.split('/').map(s => s.trim()).filter(Boolean);
+      country = segs[segs.length - 1];
+    } else {
+      country = normalized;
+    }
+    // 3. 查表，匹配原名、标准化名、去空格名
+    const continent = CC[country] || CC[normalized] || CC[parts[parts.length - 1]] || '未知';
+    // 国家名显示用中文优先：如果 CC 表里有中文 key 对应同一洲，尝试匹配
+    let displayCountry = country;
+    // 简单中文化映射
+    const cnMap = { 'Ireland':'爱尔兰','Turkey':'土耳其','Türkiye':'土耳其','Spain':'西班牙','France':'法国','Germany':'德国','Italy':'意大利','Portugal':'葡萄牙','Netherlands':'荷兰','Switzerland':'瑞士','Poland':'波兰','Sweden':'瑞典','Norway':'挪威','Finland':'芬兰','Greece':'希腊','Ukraine':'乌克兰','United Kingdom':'英国','Russia':'俄罗斯','China':'中国','Japan':'日本','South Korea':'韩国','Vietnam':'越南','Thailand':'泰国','India':'印度','Indonesia':'印度尼西亚','Philippines':'菲律宾','Malaysia':'马来西亚','Singapore':'新加坡','Iran':'伊朗','United States':'美国','USA':'美国','Canada':'加拿大','Mexico':'墨西哥','Brazil':'巴西','Argentina':'阿根廷','Chile':'智利','Colombia':'哥伦比亚','Peru':'秘鲁','Australia':'澳大利亚','New Zealand':'新西兰','Egypt':'埃及','South Africa':'南非','Nigeria':'尼日利亚','Kenya':'肯尼亚','Morocco':'摩洛哥','Algeria':'阿尔及利亚','Senegal':'塞内加尔','Ethiopia':'埃塞俄比亚','Saudi Arabia':'沙特阿拉伯' };
+    displayCountry = cnMap[country] || country;
     const rough = parts.slice(0, 3).join('，');
-    const dir = dirOf(lat, lng, CTR[country]);
-    return { continent, country, dir, rough, desc: '' };
+    const dir = dirOf(lat, lng, CTR[country]) || dirOf(lat, lng, CTR[displayCountry]);
+    return { continent, country: displayCountry, dir, rough, desc: '' };
   } catch { return null; }
 }

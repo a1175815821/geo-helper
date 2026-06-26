@@ -147,9 +147,9 @@ Google Maps: @30.2,120.1,6z
 
 ## 版本历史
 
-### v4.0（扩展版）
+### v4.0
 
-- 架构升级：油猴脚本 → Chrome MV3 扩展
+- 架构升级：Chrome MV3 扩展
 - 零二次请求：`webRequest.filterResponseData` 拦截响应体
 - 零原型污染：不 hook 任何原生 API
 - Shadow DOM closed 悬浮窗
@@ -158,34 +158,16 @@ Google Maps: @30.2,120.1,6z
 - 并发去抖，AI 超时降级
 - 配置校验
 
-### v2.0（油猴脚本）
-
-- 接入 OpenAI 兼容 AI
-- 中文输出洲/国家/八方位
-- 去除广告
-- Google Maps 直链
-
-### v1.1（油猴脚本）
-
-- 初始版本
-- XHR hook 解析街景
-- 高德/OSM 逆地理
-- 控制台输出
-
-> 油猴脚本版本（`tuxun1.1.js`、`tuxunv2.js`）保留在仓库作为历史参考，不再维护。推荐使用扩展版。
-
 ## 文件结构
 
 ```
 .
-├── extension/          # Chrome MV3 扩展（推荐）
+├── extension/          # Chrome MV3 扩展
 │   ├── manifest.json
 │   ├── background.js   # service worker，网络拦截与外部请求
 │   ├── content.js      # content script，悬浮窗显示
 │   ├── popup.html      # 配置界面
 │   └── popup.js        # 配置逻辑与校验
-├── tuxun1.1.js         # 油猴脚本 v1.1（历史）
-├── tuxunv2.js          # 油猴脚本 v2（历史）
 ├── LICENSE
 ├── README.md
 └── .gitignore

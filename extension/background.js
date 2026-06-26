@@ -2,6 +2,11 @@
 // 只负责外部 API 调用（高德/OSM/AI），不碰网络拦截
 // 响应体由 content.js 在页面内 hook fetch 拿到后发过来
 
+// 调试开关（生产期 false 全部静默）
+const __GEO_DEBUG__ = false;
+const _log = console.log.bind(console);
+const dbg = __GEO_DEBUG__ ? (...a) => _log('[Geo]', ...a) : () => {};
+
 const CFG_DEFAULTS = {
   enabled: true,
   mapSource: '',
@@ -19,8 +24,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ping') { sendResponse({ ok: true }); return true; }
   // content 拿到街景响应体后发来 url + body，由 background 解析+调外部 API
   if (msg.type === 'streetview') {
-    console.log('[BG] 收到 streetview 消息, url:', msg.url, 'body 长度:', msg.body?.length);
-    handleBody(msg.url, msg.body, sender.tab?.id).catch((e) => console.log('[BG] handleBody 异常:', e));
+    dbg('[BG] 收到 streetview 消息, url:', msg.url, 'body 长度:', msg.body?.length);
+    handleBody(msg.url, msg.body, sender.tab?.id).catch((e) => dbg('[BG] handleBody 异常:', e));
     sendResponse({ ok: true });
     return true;
   }
@@ -107,17 +112,17 @@ async function handleBody(url, body, tabId) {
 
 function push(tabId, result, errMsg) {
   if (!tabId || tabId < 0) {
-    console.log('[BG] push 跳过: tabId 无效', tabId);
+    dbg('[BG] push 跳过: tabId 无效', tabId);
     return;
   }
   const payload = result
     ? { type: 'result', data: result }
     : { type: 'result', data: null, error: errMsg };
-  console.log('[BG] 推送到 tab', tabId, 'payload:', result ? `lat=${result.coord?.lat} lng=${result.coord?.lng}` : errMsg);
+  dbg('[BG] 推送到 tab', tabId, 'payload:', result ? `lat=${result.coord?.lat} lng=${result.coord?.lng}` : errMsg);
   chrome.tabs.sendMessage(tabId, payload).then(() => {
-    console.log('[BG] 推送成功');
+    dbg('[BG] 推送成功');
   }).catch((e) => {
-    console.log('[BG] 推送失败:', e.message);
+    dbg('[BG] 推送失败:', e.message);
   });
 }
 
@@ -139,19 +144,19 @@ async function parseAndEnrich(url, body, c, skipAI = false) {
           throw new Error('not json');
         }
       }
-      console.log('[BG] GetMetadata 顶层结构:', JSON.stringify(d).slice(0, 300));
+      dbg('[BG] GetMetadata 顶层结构:', JSON.stringify(d).slice(0, 300));
       const found = searchGoogleMetadata(d);
       if (found) {
         coord = found.coord;
         pano = found.pano;
         source = 'g';
         str = found.str || '';
-        console.log('[BG] 解析成功:', coord, 'pano:', pano);
+        dbg('[BG] 解析成功:', coord, 'pano:', pano);
       } else {
-        console.log('[BG] 递归搜索未找到坐标');
+        dbg('[BG] 递归搜索未找到坐标');
       }
     } catch (e) {
-      console.log('[BG] GetMetadata 解析失败:', e.message, 'body 前 200 字节:', body.slice(0, 200));
+      dbg('[BG] GetMetadata 解析失败:', e.message, 'body 前 200 字节:', body.slice(0, 200));
       return null;
     }
   } else if (/getPanoInfo|getQQPanoInfo/.test(url)) {
@@ -197,10 +202,10 @@ async function parseAndEnrich(url, body, c, skipAI = false) {
 // ============== AI ==============
 async function aiInfo(lat, lng, raw, c) {
   if (!c.aiBase || !c.aiKey) {
-    console.log('[BG] AI 跳过: 配置缺失, aiBase:', c.aiBase || '(空)', 'aiKey:', c.aiKey ? '(有)' : '(空)');
+    dbg('[BG] AI 跳过: 配置缺失, aiBase:', c.aiBase || '(空)', 'aiKey:', c.aiKey ? '(有)' : '(空)');
     return null;
   }
-  console.log('[BG] AI 调用开始, base:', c.aiBase, 'model:', c.aiModel);
+  dbg('[BG] AI 调用开始, base:', c.aiBase, 'model:', c.aiModel);
   const prompt = `你是地理助手。根据坐标和原始信息，用中文给出结构化结果。
 
 坐标：${lat}, ${lng}
@@ -218,7 +223,7 @@ async function aiInfo(lat, lng, raw, c) {
 }`;
   try {
     const url = `${c.aiBase.replace(/\/+$/, '')}/chat/completions`;
-    console.log('[BG] AI 请求 URL:', url);
+    dbg('[BG] AI 请求 URL:', url);
     const r = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${c.aiKey}` },
@@ -229,32 +234,32 @@ async function aiInfo(lat, lng, raw, c) {
         response_format: { type: 'json_object' }
       })
     });
-    console.log('[BG] AI 响应状态:', r.status, r.statusText);
+    dbg('[BG] AI 响应状态:', r.status, r.statusText);
     if (!r.ok) {
       const errText = await r.text().catch(() => '(无法读取错误体)');
-      console.log('[BG] AI 失败, 响应体:', errText.slice(0, 300));
+      dbg('[BG] AI 失败, 响应体:', errText.slice(0, 300));
       return null;
     }
     const d = await r.json();
-    console.log('[BG] AI 响应 JSON:', JSON.stringify(d).slice(0, 300));
+    dbg('[BG] AI 响应 JSON:', JSON.stringify(d).slice(0, 300));
     // 兼容非标准字段：LongCat 用 reasoning_content，DeepSeek-R1 用 reasoning_content
     const msg = d?.choices?.[0]?.message;
     const txt = msg?.content || msg?.reasoning_content || msg?.text || '';
     if (!txt) {
-      console.log('[BG] AI 返回内容为空, 完整响应:', JSON.stringify(d).slice(0, 500));
+      dbg('[BG] AI 返回内容为空, 完整响应:', JSON.stringify(d).slice(0, 500));
       return null;
     }
-    console.log('[BG] AI 返回文本:', txt.slice(0, 200));
+    dbg('[BG] AI 返回文本:', txt.slice(0, 200));
     const m = txt.match(/\{[\s\S]*\}/);
     if (!m) {
-      console.log('[BG] AI 返回不是 JSON');
+      dbg('[BG] AI 返回不是 JSON');
       return null;
     }
     const parsed = JSON.parse(m[0]);
-    console.log('[BG] AI 解析成功:', parsed);
+    dbg('[BG] AI 解析成功:', parsed);
     return parsed;
   } catch (e) {
-    console.log('[BG] AI 异常:', e.message, e.stack);
+    dbg('[BG] AI 异常:', e.message, e.stack);
     return null;
   }
 }

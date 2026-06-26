@@ -14,7 +14,7 @@
 - **Shadow DOM closed**：悬浮窗内部节点对页面 JS 不可访问
 - **host 元素伪装**：悬浮窗宿主元素伪装成普通隐藏容器，规避 MutationObserver 和 `elementFromPoint` 检测
 - **AI 增强**：接入 OpenAI 兼容接口（支持 LongCat/DeepSeek-R1 等非标准 `reasoning_content` 字段），输出中文洲/国家/八方位/特征描述，本地降级兜底
-- **心跳保活**：content script 每 25 秒 ping service worker，避免 MV3 30 秒终止
+- **心跳保活**：content script 每 22-28 秒（jitter 随机）ping service worker，避免 MV3 30 秒终止
 - **并发去抖**：同一标签 500ms 内多次结果只推最后一次，避免悬浮窗闪烁
 - **配置校验**：高德 Key 32 位校验、AI BaseURL 协议校验、AI Key 格式校验
 - **AI 状态指示**：悬浮窗底部显示信息来源（AI 解析/本地降级/超时降级），颜色区分
@@ -71,7 +71,7 @@
 1. 打开 [tuxun.fun](https://tuxun.fun) 开始游戏
 2. 进入街景后，扩展自动解析坐标
 3. 右上角出现**绿色小圆点** = 有新结果（红色 = 出错）
-4. 按 **`Alt + H`** 弹出/关闭悬浮窗
+4. 焦点在街景 canvas 时按 **`F8`** 切换悬浮窗显示/隐藏
 5. 悬浮窗可拖动到任意位置
 
 ### 悬浮窗内容示例
@@ -88,30 +88,27 @@ Google Maps: @30.2,120.1,6z
 
 | 快捷键 | 功能 |
 |---|---|
-| `Alt + H` | 切换悬浮窗显示/隐藏 |
+| `F8` | 切换悬浮窗显示/隐藏（需焦点在街景 canvas） |
 
 ## 架构
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │  tuxun.fun 页面                                              │
-│  ┌─────────────┐    ┌──────────────────────────────────────┐│
-│  │  游戏街景    │    │  content.js (Shadow DOM closed)      ││
-│  │  发起请求    │    │  ┌────────────────────────────┐     ││
-│  │      ↓       │    │  │  悬浮窗 #box               │     ││
-│  │  接收响应    │←───│  │  地址/洲/国家/方位/描述     │     ││
-│  │  (透传未改)  │    │  └────────────────────────────┘     ││
-│  └─────────────┘    │  host 伪装成普通隐藏元素             ││
-│                     └──────────────────────────────────────┘│
-│                                  ↑ sendMessage               │
-└──────────────────────────────────┼──────────────────────────┘
-                                   │
-┌──────────────────────────────────┼──────────────────────────┐
-│  background.js (service worker)  │                           │
-│  ┌───────────────────────────────┴────────────────────────┐ │
-│  │  chrome.webRequest.onBeforeRequest                      │ │
-│  │  + filterResponseData(details.requestId)                │ │
-│  │  拦截街景响应体 → 解析坐标 → 透传给页面                  │ │
+│  ┌──────────────────────────┐  ┌───────────────────────────┐│
+│  │  inject.js (MAIN world)  │  │  content.js (ISOLATED)    ││
+│  │                          │  │  Shadow DOM closed 悬浮窗  ││
+│  │  Proxy 包装 fetch/XHR    │  │  地址/洲/国家/方位/描述    ││
+│  │  读取响应体并透传        │  │  host :host 规则隐藏      ││
+│  │       ↓ CustomEvent      │  │       ↑ sendMessage        ││
+│  │  随机事件名传 resp body ─┼──┼→ 转发到 background        ││
+│  └──────────────────────────┘  └────────────┼──────────────┘│
+└──────────────────────────────────────────────┼──────────────┘
+                                               │
+┌──────────────────────────────────────────────┼──────────────┐
+│  background.js (service worker)              │               │
+│  ┌───────────────────────────────────────────┴────────────┐ │
+│  │  解析 Google grpc-web / 百度 / 腾讯街景响应体           │ │
 │  └─────┬──────────────┬──────────────┬─────────────────────┘ │
 │        ↓              ↓              ↓                        │
 │  ┌──────────┐  ┌──────────┐  ┌──────────────┐               │
@@ -125,16 +122,17 @@ Google Maps: @30.2,120.1,6z
 
 | 检测面 | 应对 |
 |---|---|
-| MutationObserver 遍历 DOM | host 伪装成 `position:absolute;1px;visibility:hidden` 的普通隐藏元素 |
-| `elementFromPoint` 命中 | dot 加 `pointer-events:none`，不参与 hit-test |
+| MutationObserver 遍历 DOM | host 通过 `:host` CSS 规则隐藏（`position:absolute;width:0;height:0`），无 inline style，规避属性扫描 |
+| `elementFromPoint` 命中 | 悬浮窗内容在 closed Shadow DOM 内，`elementFromPoint` 只能命中 0×0 的 host 元素 |
 | 页面 JS 读取配置 | 使用 `chrome.storage.sync`，同源不可读 |
-| 页面 CSP 拦截外部请求 | 所有外部请求在 service worker 发起 |
-| 原生原型完整性检测 | 不 hook 任何原生 API |
-| 控制台异常信号 | 不输出到控制台，不调 `console.clear` |
+| 原生原型完整性检测 | fetch/XHR 用 `Proxy` 包装 + `Reflect.apply`，toString 透明转发，不修改原型 |
+| 控制台异常信号 | 生产模式静默（`__GEO_DEBUG__=false`），所有 console.log 通过编译开关消除 |
+| 自定义事件指纹 | per-session 16 字节随机事件名，不写入代码常量 |
 | `prompt/confirm` 弹窗 | 配置用扩展 popup，不碰页面 dialog |
-| service worker 30 秒终止 | content 每 25 秒心跳 ping |
+| service worker 30 秒终止 | content 每 22-28 秒（jitter 随机）心跳 ping |
 | AI 请求超时 | 20 秒超时后自动降级本地解析 |
 | 并发请求多次推送 | 同一 tab 500ms 去抖 |
+| popup 配置截屏/录屏 | 占位符脱敏，不暴露特定 AI 服务名/模型名 |
 
 ### 不可前端修复的检测面
 
@@ -149,7 +147,18 @@ Google Maps: @30.2,120.1,6z
 
 ## 版本历史
 
-### v5.0（当前正式版）
+### v6.0（当前正式版）
+
+- 反检测加固：`__GEO_DEBUG__` 编译开关，生产期 `false` 全部 console 静默
+- fetch/XHR hook 改用 `Proxy` 包装 + `Reflect.apply`，toString 透明转发，无需 defineProperty 伪装
+- CustomEvent 名称 per-session 16 字节随机化，不写入代码常量
+- Shadow DOM 内容改用 `<template>` 派生，host 元素去除 inline style，规避 MutationObserver 属性扫描
+- dot 默认 `display:none`，出结果时短暂显示
+- F8 快捷键加 canvas focus gate，仅焦点在街景 canvas 时响应
+- heartbeat 改用 `setTimeout` 递归 + jitter(22-28s)，避免固定 25s 间隔
+- popup 占位符脱敏，不暴露特定 AI 服务名/模型名
+
+### v5.0
 
 - 架构重构：移除 `webRequest.filterResponseData`（Firefox 独占，Chrome 不支持）
 - 新架构：`inject.js`（MAIN world）hook fetch/XHR + `CustomEvent` 跨 world 通信
@@ -192,10 +201,11 @@ Google Maps: @30.2,120.1,6z
 ## 技术栈
 
 - Chrome Extension Manifest V3
-- `chrome.webRequest.filterResponseData` (StreamFilter API)
-- Shadow DOM (closed mode)
+- `Proxy` + `Reflect.apply`（fetch/XHR 透明包装）
+- `CustomEvent`（跨 world 通信，per-session 随机事件名）
+- Shadow DOM (closed mode) + `<template>` 派生
 - `chrome.storage.sync`
-- Service Worker + 心跳保活
+- Service Worker + 心跳保活（jitter 随机间隔）
 - OpenAI 兼容 Chat Completions API
 
 ## 贡献

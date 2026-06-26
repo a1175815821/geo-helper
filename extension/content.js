@@ -1,18 +1,35 @@
-// content.js - 注入到 tuxun.fun (V4.1)
-// 在页面内 hook fetch 拿街景响应体，发给 background 解析+调外部 API
-// 用 Proxy 伪装，clone() 读响应不影响游戏
-// 悬浮窗 Shadow DOM closed，host 伪装成普通隐藏元素
+// content.js - ISOLATED world (V6.0)
+// 悬浮窗 Shadow DOM closed + template 派生，host 不带 inline style
+// 随机事件名通信，F8 canvas focus gate，heartbeat jitter
 
 (() => {
   'use strict';
 
-  // ============== 悬浮窗（Shadow DOM closed）==============
+  // ============== 调试开关（生产期 false 全部静默）==============
+  const __GEO_DEBUG__ = false;
+  const _log = console.log.bind(console);
+  const dbg = __GEO_DEBUG__ ? (...a) => _log('[Geo]', ...a) : () => {};
+
+  // ============== per-session 随机事件名（不写入代码常量）==============
+  const EVT = Array.from(crypto.getRandomValues(new Uint8Array(16)),
+    b => b.toString(16).padStart(2, '0')).join('');
+  try { document.documentElement.setAttribute('data-v', EVT); } catch (e) {}
+
+  // ============== 悬浮窗（Shadow DOM closed + template 派生）==============
   const host = document.createElement('div');
-  host.style.cssText = 'position:absolute;left:0;top:0;width:1px;height:1px;overflow:hidden;visibility:hidden;pointer-events:none;';
+  // host 不设 inline style，特征交给 :host 规则，规避 MutationObserver 属性扫描
   const sr = host.attachShadow({ mode: 'closed' });
-  sr.innerHTML = `
+  const tpl = document.createElement('template');
+  tpl.innerHTML = `
     <style>
-      :host { all: initial; }
+      :host {
+        all: initial;
+        position: absolute;
+        left: 0; top: 0;
+        width: 0; height: 0;
+        overflow: hidden;
+        pointer-events: none;
+      }
       #box {
         position: fixed; top: 12px; right: 12px;
         width: 300px; padding: 14px 16px;
@@ -24,7 +41,7 @@
         backdrop-filter: blur(12px);
         -webkit-backdrop-filter: blur(12px);
         cursor: move; user-select: none;
-        z-index: 9999;
+        z-index: 2147483647;
         visibility: visible;
         opacity: 0; transform: translateY(-8px) scale(0.98);
         transition: opacity 0.18s ease, transform 0.18s ease;
@@ -52,13 +69,13 @@
       #dot {
         position: fixed; top: 8px; right: 8px;
         width: 8px; height: 8px; border-radius: 50%;
-        background: #48c774; opacity: 0;
-        pointer-events: none; z-index: 9999;
+        background: #48c774;
+        display: none;
+        pointer-events: none; z-index: 2147483647;
         transition: opacity 0.25s, transform 0.25s;
-        visibility: visible;
         box-shadow: 0 0 8px rgba(72,199,116,0.6);
       }
-      #dot.show { opacity: 1; transform: scale(1.2); }
+      #dot.show { display: block; opacity: 1; transform: scale(1.2); }
       #dot.err { background: #ff3860; box-shadow: 0 0 8px rgba(255,56,96,0.6); }
     </style>
     <div id="dot"></div>
@@ -72,16 +89,14 @@
       <div class="src" id="src"></div>
     </div>
   `;
-  // 挂载 host，双保险：document_start 时 documentElement 可能未就绪
+  sr.appendChild(tpl.content.cloneNode(true));
+
+  // 挂载 host（优先 documentElement，避免直接 child 到 body 的典型特征）
   function mountHost() {
     try {
-      (document.body || document.documentElement).appendChild(host);
-      console.log('[Geo Helper] host 挂载成功, parent:', host.parentElement?.tagName || '无');
+      (document.documentElement || document.body).appendChild(host);
       return true;
-    } catch (e) {
-      console.log('[Geo Helper] host 挂载失败:', e.message);
-      return false;
-    }
+    } catch (e) { return false; }
   }
   if (!mountHost()) {
     document.addEventListener('DOMContentLoaded', () => mountHost(), { once: true });
@@ -94,7 +109,7 @@
   const elHead = sr.getElementById('head');
   const elRough = sr.getElementById('rough');
 
-  // SVG 图标库（替代 emoji，避免字体不支持）—— 必须在使用前定义
+  // SVG 图标库（替代 emoji，避免字体不支持）
   const ICONS = {
     addr: '<svg viewBox="0 0 24 24" fill="none" stroke="#00d1b2" stroke-width="2"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>',
     globe: '<svg viewBox="0 0 24 24" fill="none" stroke="#ffdd57" stroke-width="2"><circle cx="12" cy="12" r="10"/><line x1="2" y1="12" x2="22" y2="12"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>',
@@ -115,7 +130,7 @@
   const elSrc = sr.getElementById('src');
 
   // ============== 显示/隐藏切换 ==============
-  let visible = true; // 默认显示
+  let visible = true;
   box.classList.add('show');
   function toggle() {
     visible = !visible;
@@ -127,12 +142,13 @@
       box.classList.add('hide');
     }
   }
-  // F8 切换
+  // F8 切换（canvas focus gate：仅焦点在 canvas 时响应）
   document.addEventListener('keydown', (e) => {
-    if (e.key === 'F8') {
-      e.preventDefault();
-      toggle();
-    }
+    if (e.key !== 'F8') return;
+    const ae = document.activeElement;
+    if (!ae || ae.tagName !== 'CANVAS') return;
+    e.preventDefault();
+    toggle();
   }, true);
 
   // ============== 拖动 ==============
@@ -156,24 +172,25 @@
     document.addEventListener('pointerup', onUp, true);
   });
 
-  // ============== 心跳保活 SW ==============
-  setInterval(() => {
-    try {
-      if (chrome.runtime?.id) {
-        chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
-      }
-    } catch {}
-  }, 25000);
+  // ============== 心跳保活 SW（jitter 22-28s 随机化）==============
+  function schedulePing() {
+    const jitter = 22000 + Math.random() * 6000;
+    setTimeout(() => {
+      try {
+        if (chrome.runtime?.id) {
+          chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
+        }
+      } catch {}
+      schedulePing();
+    }, jitter);
+  }
+  schedulePing();
 
   // ============== 接收 background 推送 ==============
-  console.log('[Geo Helper] content.js 注册 onMessage 监听器');
-  // 初始等待状态显示时钟图标
   setIcon('status-row', 'clock');
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    console.log('[Geo Helper] content.js 收到消息:', msg?.type, msg);
     if (msg.type !== 'result') return;
     if (msg.data) {
-      console.log('[Geo Helper] 渲染数据:', msg.data);
       render(msg.data);
       dot.classList.remove('err');
       dot.classList.add('show');
@@ -188,7 +205,6 @@
   });
 
   function render(d) {
-    // 有结果后隐藏"等待中..."整行
     sr.getElementById('status-row').classList.add('hidden');
     elAddr.textContent = d.addr + (d.panoName ? ` (${d.panoName})` : '');
     setIcon('addr-row', 'addr');
@@ -201,12 +217,10 @@
       setIcon('rough-row', 'pin');
       setIcon('desc-row', 'spark');
     }
-    // 显式拼接，避免负经度导致视觉上缺逗号
     const lat = Number(d.coord.lat).toFixed(6);
     const lng = Number(d.coord.lng).toFixed(6);
     elLink.textContent = `Google Maps: @${lat},${lng},6z`;
     setIcon('link-row', 'map');
-    // AI 状态指示
     elSrc.className = 'src';
     const srcMap = {
       'ai': { cls: 'ai', icon: 'check', text: 'AI 解析' },
@@ -219,19 +233,11 @@
     elSrc.innerHTML = `<span class="dot-ic"></span>${s.text}`;
   }
 
-  // ============== 监听 page world (inject.js) 发来的响应体 ==============
-  // inject.js 在 MAIN world hook fetch，通过 CustomEvent 传回响应体
-  console.log('[Geo Helper] content.js 已加载, 监听 __geo_body__ 事件');
-  window.addEventListener('__geo_body__', (e) => {
-    console.log('[Geo Helper] content.js 收到 __geo_body__ 事件');
+  // ============== 监听 inject.js (MAIN world) 通过随机事件名传来的响应体 ==============
+  window.addEventListener(EVT, (e) => {
     try {
       const { url, body } = e.detail;
-      chrome.runtime.sendMessage({ type: 'streetview', url, body }).catch((err) => {
-        console.log('[Geo Helper] 发送给 background 失败:', err);
-      });
-      console.log('[Geo Helper] 已转发给 background');
-    } catch (err) {
-      console.log('[Geo Helper] 处理事件异常:', err);
-    }
+      chrome.runtime.sendMessage({ type: 'streetview', url, body }).catch(() => {});
+    } catch (err) {}
   });
 })();

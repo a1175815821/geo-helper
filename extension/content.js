@@ -66,19 +66,7 @@
       .src.local { color: #ffdd57; }
       .src.err { color: #ff3860; }
       .dot-ic { width: 6px; height: 6px; border-radius: 50%; background: currentColor; display: inline-block; }
-      #dot {
-        position: fixed; top: 8px; right: 8px;
-        width: 8px; height: 8px; border-radius: 50%;
-        background: #48c774;
-        display: none;
-        pointer-events: none; z-index: 2147483647;
-        transition: opacity 0.25s, transform 0.25s;
-        box-shadow: 0 0 8px rgba(72,199,116,0.6);
-      }
-      #dot.show { display: block; opacity: 1; transform: scale(1.2); }
-      #dot.err { background: #ff3860; box-shadow: 0 0 8px rgba(255,56,96,0.6); }
     </style>
-    <div id="dot"></div>
     <div id="box">
       <div class="row s" id="status-row"><div class="ic" id="status-ic"></div><div class="tx" id="status">等待中...</div></div>
       <div class="row a" id="addr-row"><div class="ic"></div><div class="tx" id="addr"></div></div>
@@ -103,7 +91,6 @@
   }
 
   const box = sr.getElementById('box');
-  const dot = sr.getElementById('dot');
   const elStatus = sr.getElementById('status');
   const elAddr = sr.getElementById('addr');
   const elHead = sr.getElementById('head');
@@ -192,15 +179,10 @@
     if (msg.type !== 'result') return;
     if (msg.data) {
       render(msg.data);
-      dot.classList.remove('err');
-      dot.classList.add('show');
-      setTimeout(() => dot.classList.remove('show'), 2000);
     } else {
       sr.getElementById('status-row').classList.remove('hidden');
       elStatus.textContent = msg.error || '未识别到坐标';
       setIcon('status-row', 'warn');
-      dot.classList.add('err', 'show');
-      setTimeout(() => dot.classList.remove('show'), 3000);
     }
   });
 

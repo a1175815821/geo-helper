@@ -11,6 +11,7 @@ const dbg = __GEO_DEBUG__ ? (...a) => _log('[Geo]', ...a) : () => {};
 
 const CFG_DEFAULTS = {
   enabled: true,
+  aiEnabled: true,
   mapSource: '',
   amapKey: '',
   aiBase: '',
@@ -84,43 +85,98 @@ function searchGoogleMetadata(node) {
   return (result.coord && result.pano) ? result : null;
 }
 
-// ============== 响应体解析 ==============
+// ============== 响应体解析（并发本地+AI，序列号防乱序）==============
+let _tabSeq = new Map();
 async function handleBody(url, body, tabId) {
   try {
     const c = await cfg();
     if (c.enabled === false) return;
-    const result = await Promise.race([
-      parseAndEnrich(url, body, c),
-      new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))
-    ]);
-    if (!result) {
-      push(tabId, null, '未识别到坐标');
-      return;
+
+    const seq = (_tabSeq.get(tabId) || 0) + 1;
+    _tabSeq.set(tabId, seq);
+
+    // Step 1: Parse coords
+    const parsed = await parseCoords(url, body);
+    if (!parsed) { push(tabId, null, '未识别到坐标', seq); return; }
+    const { coord, pano, source, str } = parsed;
+
+    // Step 2: Pano name (百度/腾讯)
+    let panoName = str;
+    if (pano) {
+      if (source === 'b') { const b = await bdName(pano); if (b) panoName = b; }
+      else if (source === 't') { const t = await qqName(pano); if (t) panoName = t; }
     }
-    push(tabId, result);
+
+    // Step 3: Address (single call, shared by local + AI)
+    let addrText, osmParts;
+    if (c.mapSource === '1' && c.amapKey) {
+      addrText = await amapRegeo(coord.lat, coord.lng, c.amapKey);
+      osmParts = [];
+    } else {
+      const osmData = await osmReverse(coord.lat, coord.lng);
+      addrText = osmData.text;
+      osmParts = osmData.parts;
+    }
+
+    // Step 4: Concurrent local + AI
+    const shouldRunAI = c.aiEnabled !== false && c.aiBase && c.aiKey;
+    const basePayload = { coord, addr: addrText, panoName, _seq: seq, _t: Date.now() };
+
+    // Start local + AI in parallel
+    const localPromise = localInfo(coord.lat, coord.lng, osmParts);
+    const aiPromise = shouldRunAI
+      ? Promise.race([
+          aiInfo(coord.lat, coord.lng, { p: source, g: panoName, r: addrText }, c),
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000))
+        ])
+      : null;
+
+    // Wait for local (always fast)
+    const localResult = await localPromise;
+    if (!localResult) { push(tabId, null, '本地解析失败', seq); return; }
+
+    // Push local result immediately
+    push(tabId, {
+      ...basePayload,
+      info: localResult,
+      aiSource: shouldRunAI ? 'local_pending' : (c.aiEnabled === false ? 'local_disabled' : 'local')
+    });
+
+    // If no AI configured, done
+    if (!shouldRunAI) return;
+
+    // Wait for AI
+    try {
+      const aiResult = await aiPromise;
+      if (_tabSeq.get(tabId) !== seq) return;
+      push(tabId, {
+        ...basePayload,
+        info: aiResult || localResult,
+        aiSource: aiResult ? 'ai' : 'local'
+      });
+    } catch (e) {
+      if (_tabSeq.get(tabId) !== seq) return;
+      push(tabId, {
+        ...basePayload,
+        info: localResult,
+        aiSource: 'local(timeout)'
+      });
+    }
+
   } catch (e) {
-    const errMsg = e.message === 'timeout' ? 'AI 请求超时，已降级' : '处理失败: ' + e.message;
-    // 超时降级
-    if (e.message === 'timeout') {
-      try {
-        const c = await cfg();
-        const r = await parseAndEnrich(url, body, c, true);
-        if (r) { push(tabId, r); return; }
-      } catch {}
-    }
-    push(tabId, null, errMsg);
+    push(tabId, null, '处理失败: ' + e.message, _tabSeq.get(tabId));
   }
 }
 
-function push(tabId, result, errMsg) {
+function push(tabId, result, errMsg, seq) {
   if (!tabId || tabId < 0) {
     dbg('[BG] push 跳过: tabId 无效', tabId);
     return;
   }
   const payload = result
-    ? { type: 'result', data: result }
-    : { type: 'result', data: null, error: errMsg };
-  dbg('[BG] 推送到 tab', tabId, 'payload:', result ? `lat=${result.coord?.lat} lng=${result.coord?.lng}` : errMsg);
+    ? { type: 'result', data: result, _seq: seq }
+    : { type: 'result', data: null, error: errMsg, _seq: seq };
+  dbg('[BG] 推送到 tab', tabId, 'seq:', seq, 'payload:', result ? `lat=${result.coord?.lat} lng=${result.coord?.lng}` : errMsg);
   chrome.tabs.sendMessage(tabId, payload).then(() => {
     dbg('[BG] 推送成功');
   }).catch((e) => {
@@ -128,7 +184,7 @@ function push(tabId, result, errMsg) {
   });
 }
 
-async function parseAndEnrich(url, body, c, skipAI = false) {
+async function parseCoords(url, body) {
   let coord = null, pano = null, source = null, str = '';
 
   if (url.includes('GetMetadata')) {
@@ -146,21 +202,14 @@ async function parseAndEnrich(url, body, c, skipAI = false) {
           throw new Error('not json');
         }
       }
-      dbg('[BG] GetMetadata 顶层结构:', JSON.stringify(d).slice(0, 300));
       const found = searchGoogleMetadata(d);
       if (found) {
         coord = found.coord;
         pano = found.pano;
         source = 'g';
         str = found.str || '';
-        dbg('[BG] 解析成功:', coord, 'pano:', pano);
-      } else {
-        dbg('[BG] 递归搜索未找到坐标');
       }
-    } catch (e) {
-      dbg('[BG] GetMetadata 解析失败:', e.message, 'body 前 200 字节:', body.slice(0, 200));
-      return null;
-    }
+    } catch (e) { return null; }
   } else if (/getPanoInfo|getQQPanoInfo/.test(url)) {
     try {
       const d = JSON.parse(body);
@@ -173,32 +222,7 @@ async function parseAndEnrich(url, body, c, skipAI = false) {
   }
 
   if (!coord) return null;
-
-  let g = str;
-  if (pano) {
-    if (source === 'b') { const b = await bdName(pano); if (b) g = b; }
-    else if (source === 't') { const t = await qqName(pano); if (t) g = t; }
-  }
-
-  let addr = '';
-  if (c.mapSource === '1' && c.amapKey) {
-    addr = await amapRegeo(coord.lat, coord.lng, c.amapKey);
-  } else {
-    addr = await osmReverse(coord.lat, coord.lng);
-  }
-
-  let info = null;
-  let aiSource = 'none';
-  if (!skipAI) {
-    info = await aiInfo(coord.lat, coord.lng, { p: source, g, r: addr }, c);
-    if (info) aiSource = 'ai';
-  }
-  if (!info) {
-    info = await localInfo(coord.lat, coord.lng);
-    if (info) aiSource = skipAI ? 'local(timeout)' : 'local';
-  }
-
-  return { coord, addr, panoName: g, info, aiSource };
+  return { coord, pano, source, str };
 }
 
 // ============== AI ==============
@@ -221,7 +245,7 @@ async function aiInfo(lat, lng, raw, c) {
   "country": "国家中文名",
   "dir": "输出该国家内的方位（中文，八方位：北部、东北部、东南部、中部等八方位，国家面积较小直接写'中部'）",
   "rough": "详细位置（中文，从大到小：省/州 → 市/区 → 县/镇，尽量具体）",
-  "desc": "一句话概括街景可见、最具定位价值的高区分度特征，不超25字。"
+  "desc": "输出街景坐标中最具辨识度组合特征的实体和最具定位价值的高区分度特征，不超25字。"
 }`;
   try {
     const url = `${c.aiBase.replace(/\/+$/, '')}/chat/completions`;
@@ -283,8 +307,12 @@ async function osmReverse(lat, lng) {
   try {
     const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=cn`);
     const d = await r.json();
-    return d.display_name ? d.display_name.split(',').reverse().slice(0, 4).join('') : '未知';
-  } catch { return 'OSM请求失败'; }
+    const parts = d.display_name ? d.display_name.split(',').map(s => s.trim()).filter(Boolean) : [];
+    return {
+      text: parts.slice().reverse().slice(0, 4).join(''),
+      parts
+    };
+  } catch { return { text: 'OSM请求失败', parts: [] }; }
 }
 
 async function bdName(id) {
@@ -305,12 +333,14 @@ async function qqName(id) {
   } catch { return ''; }
 }
 
-async function localInfo(lat, lng) {
+async function localInfo(lat, lng, parts = null) {
   try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=cn&zoom=10`);
-    const d = await r.json();
-    if (!d || !d.display_name) return null;
-    const parts = d.display_name.split(',').map(s => s.trim()).filter(Boolean);
+    if (!parts) {
+      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=cn&zoom=10`);
+      const d = await r.json();
+      if (!d || !d.display_name) return null;
+      parts = d.display_name.split(',').map(s => s.trim()).filter(Boolean);
+    }
     let country = parts[parts.length - 1] || '';
     // 国家名标准化：处理 "Éire / Ireland" 这类本地语+英语混合
     // 1. 去重音

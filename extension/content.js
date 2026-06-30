@@ -173,10 +173,18 @@
   }
   schedulePing();
 
-  // ============== 接收 background 推送 ==============
+  // ============== 接收 background 推送（序列号+时间戳双防乱序）==============
+  const _pageLoadedAt = Date.now();
+  let _lastSeq = 0;
   setIcon('status-row', 'clock');
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type !== 'result') return;
+    // 时间戳过滤：拒绝来自前一次页面导航的残留消息
+    const dataTime = msg.data && msg.data._t;
+    if (dataTime !== undefined && dataTime < _pageLoadedAt) return;
+    // 序列号过滤：同一会话内反序消息
+    if (msg._seq !== undefined && msg._seq < _lastSeq) return;
+    _lastSeq = msg._seq || 0;
     if (msg.data) {
       render(msg.data);
     } else {
@@ -194,7 +202,7 @@
       const head = [d.info.continent, d.info.country, d.info.dir].filter(Boolean).join('  |  ');
       elHead.textContent = head;
       elRough.textContent = d.info.rough || '';
-      elDesc.textContent = d.info.desc || '';
+      elDesc.textContent = d.info.desc || (d.aiSource === 'local_disabled' ? '暂无输出' : '');
       setIcon('head-row', 'globe');
       setIcon('rough-row', 'pin');
       setIcon('desc-row', 'spark');
@@ -206,6 +214,8 @@
     elSrc.className = 'src';
     const srcMap = {
       'ai': { cls: 'ai', icon: 'check', text: 'AI 解析' },
+      'local_disabled': { cls: 'ai', icon: 'check', text: '本地模式' },
+      'local_pending': { cls: 'local', icon: 'clock', text: '本地解析 (AI 等待中...)' },
       'local': { cls: 'local', icon: 'warn', text: '本地降级 (AI 未配置或失败)' },
       'local(timeout)': { cls: 'local', icon: 'warn', text: '本地降级 (AI 超时)' },
       'none': { cls: 'err', icon: 'cross', text: '无信息源' }

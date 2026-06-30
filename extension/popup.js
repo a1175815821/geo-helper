@@ -1,4 +1,4 @@
-const KEYS = ['enabled', 'mapSource', 'amapKey', 'aiBase', 'aiKey', 'aiModel'];
+const KEYS = ['enabled', 'aiEnabled', 'mapSource', 'amapKey', 'aiBase', 'aiKey', 'aiModel'];
 
 chrome.storage.sync.get(KEYS, (s) => {
   KEYS.forEach(k => {

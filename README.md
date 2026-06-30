@@ -8,6 +8,7 @@
 
 ## 功能特性
 
+- **双线程引擎**：本地解析（方向 + 粗略地址）与 AI 深度分析异步并发，本地平均 ~400ms 出结果、AI 跑完后自动覆盖更新，不浪费等待时间
 - **跨 world 通信**：`inject.js`（MAIN world）Proxy 包装 fetch/XHR → CustomEvent（随机事件名）→ `content.js`（ISOLATED world）→ background SW
 - **零外部请求泄露**：所有 API（高德 / OSM / AI）由 service worker 发起，页面 Network 面板不可见
 - **Shadow DOM closed**：悬浮窗在 closed Shadow DOM 内，`:host` CSS 伪装（`0×0` 不可见宿主），规避 `elementFromPoint` / MutationObserver
@@ -69,32 +70,6 @@ extension/
 ├── popup.js        # 配置逻辑与校验
 └── manifest.json
 ```
-
-## 更新历史
-
-### v7.0
-
-- 重构本地方位算法：提取 `direction.js`（纯函数 + 数据表），`importScripts` 加载
-- 完全移除绿色状态 dot（Shadow DOM 无残留）
-- AI prompt 优化：desc 改为"街景可见的高区分度特征"，生成结果更实用
-- README 精简化
-
-### v6.0
-
-- `__GEO_DEBUG__` 编译开关，生产期全部 console 静默
-- fetch/XHR hook 改用 `Proxy` + `Reflect.apply`，透明转发 toString
-- CustomEvent 名称 per-session 16 字节随机化
-- Shadow DOM 改用 `<template>` 派生，host 去除 inline style
-- F8 快捷键加 canvas focus gate
-- heartbeat 改用 `setTimeout` 递归 + jitter(22-28s)
-- popup 占位符脱敏
-
-### v5.0
-
-- 架构重构：移除非 Chrome 兼容的 `webRequest.filterResponseData`
-- 新架构：inject.js (MAIN world) hook fetch/XHR → CustomEvent 跨 world 通信
-- 兼容图寻代理 `tile.chao-fan.com`
-- AI 兼容 LongCat/DeepSeek-R1 `reasoning_content`
 
 ## License
 

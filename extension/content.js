@@ -226,6 +226,7 @@
   }
 
   // ============== 监听 inject.js (MAIN world) 通过随机事件名传来的响应体 ==============
+  // inject.js 已通过 setPano hook 过滤反作弊注入的假响应，仅放行 panoId 匹配的真实响应
   window.addEventListener(EVT, (e) => {
     try {
       const { url, body } = e.detail;

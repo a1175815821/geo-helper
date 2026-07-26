@@ -98,7 +98,7 @@ async function handleBody(url, body, tabId) {
     // Step 1: Parse coords
     const parsed = await parseCoords(url, body);
     if (!parsed) { push(tabId, null, '未识别到坐标', seq); return; }
-    const { coord, pano, source, str } = parsed;
+    let { coord, pano, source, str } = parsed;
 
     // Step 2: Pano name (百度/腾讯)
     let panoName = str;

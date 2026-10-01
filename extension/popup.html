@@ -13,6 +13,8 @@
   .hint { color: #888; font-size: 11px; margin-top: 4px; }
   .toggle { display: flex; align-items: center; gap: 8px; }
   .toggle input { width: auto; }
+  #tip { word-break: break-word; white-space: pre-wrap; max-height: 64px; overflow-y: auto; }
+  .foot { color: #999; font-size: 11px; margin-top: 8px; padding-top: 6px; border-top: 1px solid #eee; display: flex; justify-content: space-between; align-items: center; }
 </style>
 </head>
 <body>
@@ -39,7 +41,7 @@
 
 <div class="row">
   <label>高德 Web 服务 Key (32位)</label>
-  <input type="text" id="amapKey" placeholder="地图服务 Key">
+  <input type="password" id="amapKey" placeholder="地图服务 Key" autocomplete="off">
 </div>
 
 <div class="row">
@@ -49,7 +51,12 @@
 
 <div class="row">
   <label>AI API Key</label>
-  <input type="password" id="aiKey" placeholder="API Key">
+  <input type="password" id="aiKey" placeholder="API Key" autocomplete="off">
+</div>
+
+<div class="row toggle">
+  <input type="checkbox" id="showKeys">
+  <label for="showKeys" style="margin:0;">显示 Keys</label>
 </div>
 
 <div class="row">
@@ -59,7 +66,8 @@
 
 <button id="save">保存</button>
 <div id="tip" style="margin-top:6px;font-size:12px;min-height:16px;"></div>
-<div class="hint">配置存储在 chrome.storage，图寻页面无法读取。悬浮窗默认显示，按 <b>F8</b> 切换显示/隐藏。</div>
+<div class="hint">配置存储在 chrome.storage，图寻页面无法读取。悬浮窗默认显示，按 <b>F8</b> 切换（输入框内不触发）。</div>
+<div class="foot"><span>Geo Helper <span id="ver"></span></span><span>宽权限仅用于自定义 AI 地址</span></div>
 
 <script src="popup.js"></script>
 </body>

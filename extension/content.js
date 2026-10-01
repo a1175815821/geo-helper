@@ -32,7 +32,8 @@
       }
       #box {
         position: fixed; top: 12px; right: 12px;
-        width: 300px; padding: 14px 16px;
+        width: 300px; max-width: calc(100vw - 24px); box-sizing: border-box;
+        padding: 14px 16px;
         background: rgba(18,20,26,0.95); color: #e8e8e8;
         font-family: -apple-system, "Microsoft YaHei", sans-serif;
         font-size: 12px; line-height: 1.6;
@@ -59,6 +60,8 @@
       .r .tx { color: #48c774; }
       .d .tx { color: #b86bff; font-style: italic; }
       .l .tx { color: #3273dc; font-size: 11px; }
+      .l a { color: #3273dc; text-decoration: none; cursor: pointer; word-break: break-all; }
+      .l a:hover { text-decoration: underline; }
       .s .tx { color: #ccc; font-size: 12px; }
       .row.hidden { display: none; }
       .src { color: #666; font-size: 10px; margin-top: 8px; padding-top: 6px; border-top: 1px solid rgba(255,255,255,0.08); display: flex; align-items: center; gap: 4px; }
@@ -129,29 +132,64 @@
       box.classList.add('hide');
     }
   }
-  // F8 切换（canvas focus gate：仅焦点在 canvas 时响应）
+  // F8 切换：优先 canvas focus gate，兼顾可用性（输入框内不触发）
   document.addEventListener('keydown', (e) => {
     if (e.key !== 'F8') return;
     const ae = document.activeElement;
-    if (!ae || ae.tagName !== 'CANVAS') return;
+    const tag = ae && ae.tagName;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || (ae && ae.isContentEditable)) return;
     e.preventDefault();
     toggle();
   }, true);
 
-  // ============== 拖动 ==============
+  // ============== 拖动（带视口边界限制，防止拖出不可见）==============
+  // 位置记忆存 chrome.storage.local：页面 JS 不可读，不增加检测面
+  const POS_KEY = 'geo_box_pos';
+  const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+  function applyPos(p) {
+    if (!p || typeof p.left !== 'number' || typeof p.top !== 'number') return;
+    const w = box.offsetWidth || 300, h = box.offsetHeight || 120;
+    const maxLeft = Math.max(0, window.innerWidth - w - 4);
+    const maxTop = Math.max(0, window.innerHeight - h - 4);
+    box.style.left = clamp(p.left, 0, maxLeft) + 'px';
+    box.style.top = clamp(p.top, 0, maxTop) + 'px';
+    box.style.right = 'auto';
+  }
+  try {
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.get([POS_KEY], (res) => {
+        try { if (res && res[POS_KEY]) applyPos(res[POS_KEY]); } catch {}
+      });
+    }
+  } catch {}
   let dragging = false, dx = 0, dy = 0;
   const onMove = (e) => {
     if (!dragging) return;
-    box.style.left = (e.clientX - dx) + 'px';
-    box.style.top = (e.clientY - dy) + 'px';
+    const w = box.offsetWidth || 300, h = box.offsetHeight || 120;
+    const maxLeft = Math.max(0, window.innerWidth - w - 4);
+    const maxTop = Math.max(0, window.innerHeight - h - 4);
+    const nx = clamp(e.clientX - dx, 0, maxLeft);
+    const ny = clamp(e.clientY - dy, 0, maxTop);
+    box.style.left = nx + 'px';
+    box.style.top = ny + 'px';
     box.style.right = 'auto';
   };
   const onUp = () => {
     dragging = false;
     document.removeEventListener('pointermove', onMove, true);
     document.removeEventListener('pointerup', onUp, true);
+    try {
+      if (chrome.storage && chrome.storage.local) {
+        const r = box.getBoundingClientRect();
+        if (r && isFinite(r.left) && isFinite(r.top)) {
+          try { chrome.storage.local.set({ [POS_KEY]: { left: r.left, top: r.top } }, () => {}); } catch {}
+        }
+      }
+    } catch {}
   };
   box.addEventListener('pointerdown', (e) => {
+    // 链接上不启动拖动，保证可点
+    try { if (e.target && e.target.closest && e.target.closest('a')) return; } catch {}
     dragging = true;
     dx = e.clientX - box.offsetLeft;
     dy = e.clientY - box.offsetTop;
@@ -177,6 +215,20 @@
   const _pageLoadedAt = Date.now();
   let _lastSeq = 0;
   setIcon('status-row', 'clock');
+  // 首装引导：完全未配置时把“等待中”换成可操作的提示，避免以为坏了
+  try {
+    if (chrome.storage && chrome.storage.sync) {
+      chrome.storage.sync.get(['mapSource', 'amapKey', 'aiBase', 'aiKey'], (s) => {
+        try {
+          if (!s) return;
+          const unconf = !s.mapSource && !s.amapKey && !s.aiBase && !s.aiKey;
+          if (unconf && elStatus && elStatus.textContent === '等待中...') {
+            elStatus.textContent = '点击工具栏扩展图标完成配置后自动解析';
+          }
+        } catch {}
+      });
+    }
+  } catch {}
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (msg.type !== 'result') return;
     // 时间戳过滤：拒绝来自前一次页面导航的残留消息
@@ -198,6 +250,9 @@
     sr.getElementById('status-row').classList.add('hidden');
     elAddr.textContent = d.addr + (d.panoName ? ` (${d.panoName})` : '');
     setIcon('addr-row', 'addr');
+    // 空内容行隐藏，避免孤图标
+    const addrRow = sr.getElementById('addr-row');
+    if (addrRow) addrRow.classList.toggle('hidden', !elAddr.textContent);
     if (d.info) {
       const head = [d.info.continent, d.info.country, d.info.dir].filter(Boolean).join('  |  ');
       elHead.textContent = head;
@@ -206,18 +261,35 @@
       setIcon('head-row', 'globe');
       setIcon('rough-row', 'pin');
       setIcon('desc-row', 'spark');
+      const headRow = sr.getElementById('head-row');
+      const roughRow = sr.getElementById('rough-row');
+      const descRow = sr.getElementById('desc-row');
+      if (headRow) headRow.classList.toggle('hidden', !head);
+      if (roughRow) roughRow.classList.toggle('hidden', !d.info.rough);
+      if (descRow) descRow.classList.toggle('hidden', !elDesc.textContent);
     }
     const lat = Number(d.coord.lat).toFixed(6);
     const lng = Number(d.coord.lng).toFixed(6);
-    elLink.textContent = `Google Maps: @${lat},${lng},6z`;
+    // 可点链接：_blank 新标签打开，拖动起始于 <a> 时已放行（见 pointerdown）
+    try {
+      elLink.innerHTML = '';
+      const a = document.createElement('a');
+      a.href = `https://www.google.com/maps/@?api=1&map_action=map&center=${lat},${lng}&zoom=6`;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.textContent = `Google Maps: @${lat},${lng},6z`;
+      elLink.appendChild(a);
+    } catch {
+      elLink.textContent = `Google Maps: @${lat},${lng},6z`;
+    }
     setIcon('link-row', 'map');
     elSrc.className = 'src';
     const srcMap = {
       'ai': { cls: 'ai', icon: 'check', text: 'AI 解析' },
       'local_disabled': { cls: 'ai', icon: 'check', text: '本地模式' },
       'local_pending': { cls: 'local', icon: 'clock', text: '本地解析 (AI 等待中...)' },
-      'local': { cls: 'local', icon: 'warn', text: '本地降级 (AI 未配置或失败)' },
-      'local(timeout)': { cls: 'local', icon: 'warn', text: '本地降级 (AI 超时)' },
+      'local': { cls: 'local', icon: 'warn', text: '本地结果 · 配置 AI 可提升精度' },
+      'local(timeout)': { cls: 'local', icon: 'warn', text: '本地结果 · AI 超时' },
       'none': { cls: 'err', icon: 'cross', text: '无信息源' }
     };
     const s = srcMap[d.aiSource] || { cls: 'err', icon: 'cross', text: '未知: ' + d.aiSource };

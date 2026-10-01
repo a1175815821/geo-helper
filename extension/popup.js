@@ -9,6 +9,24 @@ chrome.storage.sync.get(KEYS, (s) => {
   });
 });
 
+// 版本号跟随 manifest，避免文档滞后；Keys 默认脱敏
+try {
+  const verEl = document.getElementById('ver');
+  if (verEl && chrome.runtime && chrome.runtime.getManifest) {
+    verEl.textContent = 'v' + chrome.runtime.getManifest().version;
+  }
+} catch {}
+const showKeysEl = document.getElementById('showKeys');
+if (showKeysEl) {
+  showKeysEl.addEventListener('change', () => {
+    const t = showKeysEl.checked ? 'text' : 'password';
+    const a = document.getElementById('amapKey');
+    const k = document.getElementById('aiKey');
+    if (a) a.type = t;
+    if (k) k.type = t;
+  });
+}
+
 function validate() {
   const errs = [];
   const amapKey = document.getElementById('amapKey').value.trim();

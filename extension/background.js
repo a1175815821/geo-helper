@@ -9,6 +9,22 @@ const __GEO_DEBUG__ = false;
 const _log = console.log.bind(console);
 const dbg = __GEO_DEBUG__ ? (...a) => _log('[Geo]', ...a) : () => {};
 
+// 带超时的 fetch：OSM 在国内无魔法时可能 hang 住，必须能快速失败
+// 用 AbortController 主动取消，避免 SW 空挂 + Promise.race 泄漏
+async function fetchWithTimeout(url, ms = 5000, options = {}) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), ms);
+  try {
+    const r = await fetch(url, { ...options, signal: ctrl.signal });
+    return r;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+function timeoutRace(p, ms) {
+  return Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), ms))]);
+}
+
 const CFG_DEFAULTS = {
   enabled: true,
   aiEnabled: true,
@@ -51,8 +67,9 @@ function searchGoogleMetadata(node) {
     visited.add(n);
 
     if (Array.isArray(n)) {
-      // 优先匹配坐标：[null, null, lat, lng] 格式
-      // lat/lng 必须是浮点数（含小数点），范围 -90~90 / -180~180
+      // 优先匹配坐标：[null, null, lat, lng] 格式，范围 -90~90 / -180~180
+      // 必须至少一个非整数：过滤 grpc-web 里 [null,null,0,0] 类占位，避免全球模式错误闪现
+      // 真实街景坐标几乎全是浮点，整数坐标无街景价值
       if (n.length >= 4 && n[0] === null && n[1] === null
           && typeof n[2] === 'number' && typeof n[3] === 'number'
           && n[2] >= -90 && n[2] <= 90 && n[3] >= -180 && n[3] <= 180
@@ -100,22 +117,50 @@ async function handleBody(url, body, tabId) {
     if (!parsed) { push(tabId, null, '未识别到坐标', seq); return; }
     let { coord, pano, source, str } = parsed;
 
-    // Step 2: Pano name (百度/腾讯)
+    // Step 2 & 3: Pano name + Address 并发，带超时避免阻塞本地推送
     let panoName = str;
+    let panoNamePromise = null;
     if (pano) {
-      if (source === 'b') { const b = await bdName(pano); if (b) panoName = b; }
-      else if (source === 't') { const t = await qqName(pano); if (t) panoName = t; }
+      if (source === 'b') panoNamePromise = bdName(pano);
+      else if (source === 't') panoNamePromise = qqName(pano);
     }
 
-    // Step 3: Address (single call, shared by local + AI)
     let addrText, osmParts;
     if (c.mapSource === '1' && c.amapKey) {
-      addrText = await amapRegeo(coord.lat, coord.lng, c.amapKey);
-      osmParts = [];
+      // 高德取地址，同时并行取 OSM parts 供本地方位
+      // OSM 失败不阻塞：osmParts 为空时 localInfo 直接降级未知，不再二次请求
+      const amapP = amapRegeo(coord.lat, coord.lng, c.amapKey);
+      const osmP = osmReverse(coord.lat, coord.lng).catch(() => ({ text: '', parts: [] }));
+      try {
+        const [amapText, osmData] = await Promise.all([
+          timeoutRace(amapP, 5000).catch(() => '请求超时'),
+          timeoutRace(osmP, 5000).catch(() => ({ text: '', parts: [] }))
+        ]);
+        addrText = amapText;
+        osmParts = osmData && osmData.parts && osmData.parts.length ? osmData.parts : null;
+      } catch {
+        addrText = '请求失败';
+        osmParts = null;
+      }
     } else {
-      const osmData = await osmReverse(coord.lat, coord.lng);
+      // 默认 OSM 分支：同样 5s 超时，避免无魔法时卡死在“等待中”
+      const osmData = await timeoutRace(
+        osmReverse(coord.lat, coord.lng).catch(() => ({ text: 'OSM请求失败', parts: [] })),
+        6000
+      ).catch(() => ({ text: '请求超时', parts: [] }));
       addrText = osmData.text;
       osmParts = osmData.parts;
+    }
+
+    // panoName 不阻塞主流程，带 3s 超时
+    if (panoNamePromise) {
+      try {
+        const raced = await Promise.race([
+          panoNamePromise,
+          new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 3000))
+        ]);
+        if (raced) panoName = raced;
+      } catch {}
     }
 
     // Step 4: Concurrent local + AI
@@ -131,9 +176,17 @@ async function handleBody(url, body, tabId) {
         ])
       : null;
 
-    // Wait for local (always fast)
-    const localResult = await localPromise;
-    if (!localResult) { push(tabId, null, '本地解析失败', seq); return; }
+    // Wait for local (always fast, 带超时兜底)
+    // 本地失败不再整体失败：降级为未知后继续走 AI，保证高德地址 + AI 仍可见
+    let localResult;
+    try {
+      localResult = await timeoutRace(localPromise, 6000).catch(() => null);
+    } catch {
+      localResult = null;
+    }
+    if (!localResult) {
+      localResult = { continent: '未知', country: '', dir: '', rough: '', desc: '' };
+    }
 
     // Push local result immediately
     push(tabId, {
@@ -293,31 +346,35 @@ async function aiInfo(lat, lng, raw, c) {
 // ============== 地理服务 ==============
 async function amapRegeo(lat, lng, key) {
   try {
-    const r = await fetch(`https://restapi.amap.com/v3/geocode/regeo?output=json&location=${lng},${lat}&key=${key}&radius=100`);
+    const r = await fetchWithTimeout(`https://restapi.amap.com/v3/geocode/regeo?output=json&location=${lng},${lat}&key=${key}&radius=100`, 5000);
     const d = await r.json();
     if (d.status === '1' && d.regeocode) {
       const c = d.regeocode.addressComponent;
-      return [c.province, c.city, c.district, c.township].filter(x => x && typeof x === 'string').join('');
+      return [c.province, c.city, c.district, c.township].filter(x => x && typeof x === 'string').join('') || '未知';
     }
     return '未知(Key无效?)';
-  } catch { return '请求失败'; }
+  } catch (e) {
+    return (e && e.name === 'AbortError') ? '请求超时' : '请求失败';
+  }
 }
 
 async function osmReverse(lat, lng) {
   try {
-    const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=cn`);
+    const r = await fetchWithTimeout(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=zh-CN`, 5000);
     const d = await r.json();
     const parts = d.display_name ? d.display_name.split(',').map(s => s.trim()).filter(Boolean) : [];
     return {
-      text: parts.slice().reverse().slice(0, 4).join(''),
+      text: parts.length ? parts.slice().reverse().slice(0, 4).join('') : '未知',
       parts
     };
-  } catch { return { text: 'OSM请求失败', parts: [] }; }
+  } catch (e) {
+    return { text: (e && e.name === 'AbortError') ? '请求超时' : 'OSM请求失败', parts: [] };
+  }
 }
 
 async function bdName(id) {
   try {
-    const r = await fetch(`https://mapsv0.bdimg.com/?qt=sdata&sid=${id}`);
+    const r = await fetchWithTimeout(`https://mapsv0.bdimg.com/?qt=sdata&sid=${id}`, 3000);
     const d = await r.json();
     return d.content?.[0]?.Rname || '';
   } catch { return ''; }
@@ -325,7 +382,7 @@ async function bdName(id) {
 
 async function qqName(id) {
   try {
-    const r = await fetch(`https://sv.map.qq.com/sv?svid=${id}&output=json`);
+    const r = await fetchWithTimeout(`https://sv.map.qq.com/sv?svid=${id}&output=json`, 3000);
     const buf = await r.arrayBuffer();
     const txt = new TextDecoder('GBK').decode(buf);
     const j = JSON.parse(txt);
@@ -333,13 +390,25 @@ async function qqName(id) {
   } catch { return ''; }
 }
 
+const GEO_UNKNOWN = { continent: '未知', country: '', dir: '', rough: '', desc: '' };
+
 async function localInfo(lat, lng, parts = null) {
   try {
-    if (!parts) {
-      const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=cn&zoom=10`);
-      const d = await r.json();
-      if (!d || !d.display_name) return null;
-      parts = d.display_name.split(',').map(s => s.trim()).filter(Boolean);
+    // parts 为 null/空数组 = 上游 OSM 已试过且失败，直接降级未知，不再二次请求
+    // 避免高德分支 5s + 本地 5s 双重等待，以及无魔法下必现“本地解析失败”
+    // 仅 parts === undefined（历史直接调用）才回退请求一次
+    if (parts === undefined) {
+      try {
+        const r = await fetchWithTimeout(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&accept-language=zh-CN&zoom=10`, 5000);
+        const d = await r.json();
+        if (!d || !d.display_name) return { ...GEO_UNKNOWN };
+        parts = d.display_name.split(',').map(s => s.trim()).filter(Boolean);
+      } catch {
+        return { ...GEO_UNKNOWN };
+      }
+    }
+    if (!parts || (Array.isArray(parts) && parts.length === 0)) {
+      return { ...GEO_UNKNOWN };
     }
     let country = parts[parts.length - 1] || '';
     // 国家名标准化：处理 "Éire / Ireland" 这类本地语+英语混合
@@ -358,5 +427,5 @@ async function localInfo(lat, lng, parts = null) {
     const rough = parts.slice(0, 3).join('，');
     const dir = GeoDir.dirOf(lat, lng, GeoDir.CTR[country]) || GeoDir.dirOf(lat, lng, GeoDir.CTR[displayCountry]);
     return { continent, country: displayCountry, dir, rough, desc: '' };
-  } catch { return null; }
+  } catch { return { ...GEO_UNKNOWN }; }
 }

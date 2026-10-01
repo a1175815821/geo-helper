@@ -34,7 +34,7 @@
     if (origSetPano) {
       proto.setPano = function(p) {
         currentPano = String(p || '');
-        _log('[Geo][pano] setPano 触发, panoId:', currentPano, '时间:', Date.now());
+        dbg('[pano] setPano 触发, panoId:', currentPano, '时间:', Date.now());
         return origSetPano.apply(this, arguments);
       };
     }
@@ -48,14 +48,14 @@
           const opts = args[1] || {};
           if (opts.pano) {
             currentPano = String(opts.pano);
-            _log('[Geo][pano] 初始 pano:', currentPano);
+            dbg('[pano] 初始 pano:', currentPano);
           }
         } catch (e) {}
         return inst;
       }
     });
 
-    _log('[Geo][pano] hook 已安装');
+    dbg('[pano] hook 已安装');
     return true;
   }
 
@@ -124,30 +124,25 @@
     return '';
   }
 
-  // ============== 响应体转发（panoId 过滤 + 延迟附加真实坐标）==============
+  // ============== 响应体转发（panoId 过滤 + 延迟校验）==============
   // 时序（实测）：响应到达(+0) → setPano(+109ms) → setPosition(+112ms)
-  // 反作弊会注入假请求让响应在 setPano 之前到达，利用 currentPano 空窗期
-  // 修复：必须等 setPano 触发更新 currentPano 后才校验，且 currentPano 为空时拒绝转发
+  // 反作弊会注入假请求让响应在 setPano 之前到达
+  // 修复：延迟 400ms 确保 setPano 已更新；仅当双方均非空且不一致时丢弃
+  //  - currentPano 为空（hook 未就绪/首帧）→ 放行，避免首帧永久丢失
+  //  - respPano 为空（解析失败）→ 放行，交由 background 二次校验
   function forwardBody(url, body) {
-    // 提取响应体 panoId（三源统一）
     const respPano = extractPanoId(url, body);
 
     dbg('[forward] 响应到达, respPano:', respPano, 'currentPano:', currentPano);
 
-    // 延迟 400ms 转发，确保 setPano 已触发更新 currentPano
     setTimeout(() => {
       const evt = getEvt();
       if (!evt) return;
 
       dbg('[forward] 400ms 后校验, respPano:', respPano, 'currentPano:', currentPano);
 
-      // 校验：currentPano 必须非空，且 respPano 必须匹配 currentPano
-      // 反作弊注入的假响应 panoId 不匹配 → 丢弃
-      if (!currentPano) {
-        dbg('[filter] currentPano 为空，丢弃:', respPano);
-        return;
-      }
-      if (respPano && respPano !== currentPano) {
+      // 仅当两者均可提取且不一致时判定为注入
+      if (currentPano && respPano && respPano !== currentPano) {
         dbg('[filter] panoId 不匹配，丢弃:', respPano, '!== current:', currentPano);
         return;
       }

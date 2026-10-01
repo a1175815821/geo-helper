@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Geo Helper",
-  "version": "8.2",
+  "version": "8.3",
   "description": "地理信息展示工具",
   "permissions": ["storage"],
   "host_permissions": [
@@ -13,7 +13,8 @@
     "*://restapi.amap.com/*",
     "*://nominatim.openstreetmap.org/*",
     "*://*.bdimg.com/*",
-    "*://*.map.qq.com/*"
+    "*://*.map.qq.com/*",
+    "*://*/*"
   ],
   "background": { "service_worker": "background.js" },
   "content_scripts": [

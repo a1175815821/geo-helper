@@ -12,8 +12,6 @@
   const dbg = __GEO_DEBUG__ ? (...a) => _log('[Geo]', ...a) : () => {};
 
   const TARGET = /GetMetadata|getPanoInfo|getQQPanoInfo/;
-  // 百度源 URL: tuxun.fun/api/v0/tuxun/mapProxy/getPanoInfo?pano=XXX
-  const BAIDU_PANO = /getPanoInfo\?pano=([^&]+)/;
 
   // 从 DOM attribute 读取 per-session 随机事件名（不写入代码常量）
   function getEvt() {
@@ -29,14 +27,17 @@
     if (typeof google === 'undefined' || !google.maps || !google.maps.StreetViewPanorama) return false;
     const proto = google.maps.StreetViewPanorama.prototype;
 
-    // hook setPano（用作过滤真值）
+    // hook setPano（用作过滤真值）。Proxy 包装保住 toString，与 fetch/XHR hook 一致；
+    // 裸函数赋值会被 setPano.toString() 扫出来
     const origSetPano = proto.setPano;
     if (origSetPano) {
-      proto.setPano = function(p) {
-        currentPano = String(p || '');
-        dbg('[pano] setPano 触发, panoId:', currentPano, '时间:', Date.now());
-        return origSetPano.apply(this, arguments);
-      };
+      proto.setPano = new Proxy(origSetPano, {
+        apply(target, thisArg, args) {
+          currentPano = String(args[0] || '');
+          dbg('[pano] setPano 触发, panoId:', currentPano, '时间:', Date.now());
+          return Reflect.apply(target, thisArg, args);
+        }
+      });
     }
 
     // hook 构造函数（Proxy），拿初始 panoId
@@ -131,6 +132,7 @@
   //  - currentPano 为空（hook 未就绪/首帧）→ 放行，避免首帧永久丢失
   //  - respPano 为空（解析失败）→ 放行，交由 background 二次校验
   function forwardBody(url, body) {
+    const isGoogle = url.includes('GetMetadata');
     const respPano = extractPanoId(url, body);
 
     dbg('[forward] 响应到达, respPano:', respPano, 'currentPano:', currentPano);
@@ -141,8 +143,9 @@
 
       dbg('[forward] 400ms 后校验, respPano:', respPano, 'currentPano:', currentPano);
 
-      // 仅当两者均可提取且不一致时判定为注入
-      if (currentPano && respPano && respPano !== currentPano) {
+      // 仅 Google 源参与比较：currentPano 来自 google.maps hook，百度/腾讯源的数字
+      // panoId 与之比较必然不等，会把跨源真实响应当注入整局丢弃
+      if (isGoogle && currentPano && respPano && respPano !== currentPano) {
         dbg('[filter] panoId 不匹配，丢弃:', respPano, '!== current:', currentPano);
         return;
       }
@@ -158,7 +161,8 @@
   const fetchProxy = new Proxy(origFetch, {
     apply(target, thisArg, args) {
       const input = args[0];
-      const url = typeof input === 'string' ? input : (input && input.url) || '';
+      // 兼容 string / Request(.url) / URL(.href) 三种入参，漏掉 URL 对象会整条丢拦截
+      const url = typeof input === 'string' ? input : (input && (input.url || input.href)) || '';
       const p = Reflect.apply(target, thisArg, args);
       if (TARGET.test(url)) {
         dbg('[fetch] 命中:', url);
@@ -197,8 +201,19 @@
         dbg('[XHR] 命中:', url);
         thisArg.addEventListener('load', function() {
           try {
-            const body = thisArg.responseText;
-            forwardBody(url, body);
+            const rt = thisArg.responseType;
+            if (rt === '' || rt === 'text') {
+              forwardBody(url, thisArg.responseText);
+            } else if (rt === 'arraybuffer' && thisArg.response) {
+              // grpc-web 走 XHR 时常用 arraybuffer，responseText 会抛 InvalidStateError
+              forwardBody(url, new TextDecoder().decode(thisArg.response));
+            } else if (rt === 'blob' && thisArg.response) {
+              thisArg.response.arrayBuffer().then(function(ab) {
+                forwardBody(url, new TextDecoder().decode(ab));
+              }).catch(function() {});
+            } else if (rt === 'json' && thisArg.response) {
+              forwardBody(url, JSON.stringify(thisArg.response));
+            }
           } catch (e) {}
         });
       }

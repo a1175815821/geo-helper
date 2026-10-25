@@ -1,7 +1,7 @@
 // direction.js - 本地方位算法与地理数据表（MAX 版 · Unicode 标准化全覆盖）
 // 自动为每个带变音名称生成 NFC / NFD / NFKD / 去重音 / 去重音去空格 五种变体
 // 覆盖 195+ 国家/地区 · 中文 + 英文 + 本国文字 + 所有 Unicode 变形
-// 含群岛标注(ARCH) + 地区匹配库(REG)
+// 含地区匹配库(REG)：CC 查不到国家时按地区名兜底识别
 (function() {
   'use strict';
 
@@ -1011,71 +1011,6 @@
     'Crete':'克里特','Kriti':'克里特','Rhodes':'罗得岛','Rodos':'罗得岛','Zanzibar':'桑给巴尔','Unguja':'桑给巴尔','Pemba':'奔巴'
   };
 
-  // ==================== 群岛标注 ARCH ====================
-  const ARCH = {
-    'Indonesia':true,'印度尼西亚':true,'Republik Indonesia':true,'马来群岛':true,'Kepulauan Nusantara':true,'Japan':true,'日本':true,'日本列島':true,
-    'Japanese Archipelago':true,'Philippines':true,'菲律宾':true,'菲律宾群岛':true,'Pilipinas':true,'Kapuluan ng Pilipinas':true,'New Zealand':true,'新西兰':true,
-    'Aotearoa':true,'New Zealand archipelago':true,'Fiji':true,'斐济':true,'Fiji archipelago':true,'Viti':true,'Solomon Islands':true,'所罗门群岛':true,
-    'Solomon Islands archipelago':true,'Vanuatu':true,'瓦努阿图':true,'Vanuatu archipelago':true,'Samoa':true,'萨摩亚':true,'Samoan Islands':true,'Tonga':true,
-    '汤加':true,'Tonga archipelago':true,'Kiribati':true,'基里巴斯':true,'Gilbert Islands':true,'Micronesia':true,'密克罗尼西亚':true,'Caroline Islands':true,
-    'Marshall Islands':true,'马绍尔群岛':true,'Ṃajeḷ':true,'Palau':true,'帕劳':true,'Palau archipelago':true,'Belau':true,'Nauru':true,
-    '瑙鲁':true,'Tuvalu':true,'图瓦卢':true,'Ellice Islands':true,'Bahamas':true,'巴哈马':true,'Lucayan Archipelago':true,'Maldives':true,
-    '马尔代夫':true,'Maldive Islands':true,'Comoros':true,'科摩罗':true,'Comoro Islands':true,'Komori':true,'جزر القمر':true,'Cape Verde':true,
-    '佛得角':true,'Cabo Verde':true,'Cape Verde Archipelago':true,'São Tomé and Príncipe':true,'圣多美和普林西比':true,'São Tomé e Príncipe':true,'Seychelles':true,'塞舌尔':true,
-    'Sesel':true,'Mauritius':true,'毛里求斯':true,'Mascarene Islands':true,'Cyprus':true,'塞浦路斯':true,'Κύπρος':true,'Kıbrıs':true,
-    'Malta':true,'马耳他':true,'Maltese Islands':true,'Iceland':true,'冰岛':true,'Ísland':true,'Singapore':true,'新加坡':true,
-    'Singapura':true,'Sri Lanka':true,'斯里兰卡':true,'Pearl of the Indian Ocean':true,'Madagascar':true,'马达加斯加':true,'Madagasikara':true,'Great Red Island':true,
-    'Greenland':true,'格陵兰':true,'Kalaallit Nunaat':true,'Malaysia':true,'马来西亚':true,'Malay Archipelago':true,'Greece':true,'希腊':true,
-    'Ελλάδα':true,'Greek Islands':true,'Denmark':true,'丹麦':true,'Danmark':true,'Danish Archipelago':true,'Sweden':true,'瑞典':true,
-    'Sverige':true,'Stockholm Archipelago':true,'Finland':true,'芬兰':true,'Suomi':true,'Archipelago Sea':true,'Estonia':true,'爱沙尼亚':true,
-    'Eesti':true,'Moonsund Archipelago':true,'Croatia':true,'克罗地亚':true,'Hrvatska':true,'Dalmatian Islands':true,'Thailand':true,'泰国':true,
-    'ประเทศไทย':true,'Andaman Islands':true,'Chile':true,'智利':true,'Chilean Archipelago':true,'Chiloé Archipelago':true,'Canada':true,'加拿大':true,
-    'Canadian Arctic Archipelago':true,'United States':true,'美国':true,'USA':true,'Hawaiian Islands':true,'Australia':true,'澳大利亚':true,'Australian islands':true,
-    'Russia':true,'俄罗斯':true,'Россия':true,'Russian Arctic islands':true,'China':true,'中国':true,'Hainan Island':true,'Zhoushan Archipelago':true,
-    'Hong Kong':true,'香港':true,'Hong Kong Island':true,'Taiwan':true,'台湾':true,'臺灣':true,'Formosa':true,'Puerto Rico':true,
-    '波多黎各':true,'Borikén':true,'Guam':true,'关岛':true,'Guåhan':true,'Marianas':true,'Bermuda':true,'百慕大':true,
-    'Bermuda Islands':true,'Cayman Islands':true,'开曼群岛':true,'Faroe Islands':true,'法罗群岛':true,'Føroyar':true,'Færøerne':true,'New Caledonia':true,
-    '新喀里多尼亚':true,'Nouvelle-Calédonie':true,'French Polynesia':true,'法属波利尼西亚':true,'Polynésie française':true,'Society Islands':true,'Cook Islands':true,'库克群岛':true,
-    'Kūki \'Āirani':true,'British Virgin Islands':true,'英属维尔京群岛':true,'US Virgin Islands':true,'美属维尔京群岛':true,'United States Virgin Islands':true,'Åland Islands':true,'奥兰群岛':true,
-    'Åland':true,'Ahvenanmaa':true,'Svalbard':true,'斯瓦尔巴':true,'Svalbard archipelago':true,'Réunion':true,'留尼汪':true,'La Réunion':true,
-    'Mayotte':true,'马约特':true,'Maore':true,'Azores':true,'亚速尔群岛':true,'Açores':true,'Canary Islands':true,'加那利群岛':true,
-    'Islas Canarias':true,'Madeira':true,'马德拉群岛':true,'Madeira Islands':true,'Galápagos Islands':true,'加拉帕戈斯群岛':true,'Archipiélago de Galápagos':true,'Easter Island':true,
-    '复活节岛':true,'Rapa Nui':true,'Isla de Pascua':true,'Christmas Island':true,'圣诞岛':true,'Cocos Islands':true,'科科斯群岛':true,'Keeling Islands':true,
-    'Norfolk Island':true,'诺福克岛':true,'Pitcairn Islands':true,'皮特凯恩群岛':true,'Pitcairn':true,'Saint Helena':true,'圣赫勒拿':true,'Falkland Islands':true,
-    '福克兰群岛':true,'Malvinas':true,'Islas Malvinas':true,'South Georgia':true,'南乔治亚':true,'South Georgia and the South Sandwich Islands':true,'Chagos Archipelago':true,'查戈斯群岛':true,
-    'British Indian Ocean Territory':true,'Diego Garcia':true,'迪戈加西亚岛':true,'Mallorca':true,'Menorca':true,'Ibiza':true,'Eivissa':true,'Formentera':true,
-    'Cabrera':true,'Gran Canaria':true,'GranCanaria':true,'Tenerife':true,'Lanzarote':true,'Fuerteventura':true,'La Palma':true,'LaPalma':true,
-    'La Gomera':true,'LaGomera':true,'El Hierro':true,'ElHierro':true,'Porto Santo':true,'PortoSanto':true,'Açores':true,'Acores':true,
-    'Corse':true,'Corsica':true,'Sardegna':true,'Sardinia':true,'Sicilia':true,'Sicily':true,'Creta':true,'Crete':true,
-    'Kriti':true,'Rhodes':true,'Rodos':true,'Mykonos':true,'Santorini':true,'Thira':true,'Κύπρος':true,'Κυπρος':true,
-    'Gozo':true,'Comino':true,'Bali':true,'Lombok':true,'Java':true,'Sumatra':true,'Borneo':true,'Sulawesi':true,
-    'Kalimantan':true,'Honshu':true,'Hokkaido':true,'Kyushu':true,'Shikoku':true,'Okinawa':true,'Luzon':true,'Mindanao':true,
-    'Visayas':true,'Palawan':true,'Cebu':true,'Tasmania':true,'Kangaroo Island':true,'KangarooIsland':true,'South Island':true,'SouthIsland':true,
-    'North Island':true,'NorthIsland':true,'Stewart Island':true,'StewartIsland':true,'Chatham Island':true,'ChathamIsland':true,'Hawaii':true,'Maui':true,
-    'Oahu':true,'Kauai':true,'Lanai':true,'Molokai':true,'Barbados':true,'CaymanIslands':true,'Cayman Brac':true,'CaymanBrac':true,
-    'Vanua Levu':true,'VanuaLevu':true,'Viti Levu':true,'VitiLevu':true,'Malé Atoll':true,'Malé Atoll':true,'Male Atoll':true,'MaleAtoll':true,
-    'Ari Atoll':true,'AriAtoll':true,'Mahé':true,'Mahé':true,'Mahe':true,'Praslin':true,'La Digue':true,'LaDigue':true,
-    'Rodrigues':true,'Réunion':true,'Reunion':true,'Galapagos':true,'Galápagos':true,'Galápagos':true,'Isabela':true,'Santa Cruz':true,
-    'SantaCruz':true,'San Cristóbal':true,'San Cristóbal':true,'San Cristobal':true,'SanCristobal':true,'EasterIsland':true,'RapaNui':true,'Chiloé':true,
-    'Chiloé':true,'Chiloe':true,'Tierra del Fuego':true,'TierradelFuego':true,'HongKongIsland':true,'Lantau':true,'Lamma':true,'Kinmen':true,
-    'Matsu':true,'Penghu':true,'Hainan':true,'Sentosa':true,'SriLanka':true,'FaroeIslands':true,'Streymoy':true,'Vágar':true,
-    'Vágar':true,'Vagar':true,'Shetland':true,'Orkney':true,'Skye':true,'Lewis and Harris':true,'LewisandHarris':true,'Isle of Wight':true,
-    'IsleofWight':true,'Isle of Man':true,'IsleofMan':true,'Channel Islands':true,'ChannelIslands':true,'Jersey':true,'Guernsey':true,'Alderney':true,
-    'Sark':true,'Gotland':true,'Öland':true,'Öland':true,'Oland':true,'Bornholm':true,'Sjaelland':true,'Fyn':true,
-    'Åland':true,'Aland':true,'Franz Josef Land':true,'FranzJosefLand':true,'Novaya Zemlya':true,'NovayaZemlya':true,'Severnaya Zemlya':true,'SevernayaZemlya':true,
-    'Sakhalin':true,'Kuril Islands':true,'KurilIslands':true,'Kamchatka':true,'Aleutian Islands':true,'AleutianIslands':true,'Pribilof Islands':true,'PribilofIslands':true,
-    'Vancouver Island':true,'VancouverIsland':true,'Baffin Island':true,'BaffinIsland':true,'Victoria Island':true,'VictoriaIsland':true,'Ellesmere Island':true,'EllesmereIsland':true,
-    'Prince Edward Island':true,'PrinceEdwardIsland':true,'Newfoundland':true,'Labrador':true,'PuertoRico':true,'Culebra':true,'Vieques':true,'Virgin Islands':true,
-    'VirginIslands':true,'Tortola':true,'Saint Thomas':true,'SaintThomas':true,'Saint John':true,'SaintJohn':true,'Saint Croix':true,'SaintCroix':true,
-    'Saipan':true,'Tinian':true,'Rota':true,'NewCaledonia':true,'Grande Terre':true,'GrandeTerre':true,'Tahiti':true,'Moorea':true,
-    'Bora Bora':true,'BoraBora':true,'Raiatea':true,'American Samoa':true,'AmericanSamoa':true,'NorfolkIsland':true,'ChristmasIsland':true,'CocosIslands':true,
-    'SaintHelena':true,'Ascension':true,'Tristan da Cunha':true,'TristandaCunha':true,'FalklandIslands':true,'SouthGeorgia':true,'South Sandwich':true,'SouthSandwich':true,
-    'Zanzibar':true,'Pemba':true,'Bioko':true,'São Tomé':true,'São Tomé':true,'Sao Tome':true,'SaoTome':true,'Príncipe':true,
-    'Príncipe':true,'Principe':true,'Grande Comore':true,'GrandeComore':true,'Anjouan':true,'Mohéli':true,'Mohéli':true,'Moheli':true,
-    'CapeVerde':true,'Santiago':true,'Sal':true,'Boa Vista':true,'BoaVista':true,'CanaryIslands':true,'Canarias':true,'Gibraltar':true,
-    'Macau':true,'Macao':true,'Coloane':true,'Taipa':true,'HongKong':true
-  };
-
   // ==================== 地区匹配库 REG ====================
   const REG = {
     'An Giang':'越南','Bà Rịa-Vũng Tàu':'越南','Bạc Liêu':'越南','Bắc Giang':'越南','Bắc Kạn':'越南','Bắc Ninh':'越南',
@@ -1346,5 +1281,5 @@
     return ns + ew + '部';
   }
 
-  self.GeoDir = { DT, CC, CTR, cnMap, dirOf, ARCH, REG };
+  self.GeoDir = { DT, CC, CTR, cnMap, dirOf, REG };
 })();

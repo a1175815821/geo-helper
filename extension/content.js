@@ -137,7 +137,7 @@
     if (e.key !== 'F8') return;
     const ae = document.activeElement;
     const tag = ae && ae.tagName;
-    if (tag === 'INPUT' || tag === 'TEXTAREA' || (ae && ae.isContentEditable)) return;
+    if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (ae && ae.isContentEditable)) return;
     e.preventDefault();
     toggle();
   }, true);
@@ -178,6 +178,7 @@
     dragging = false;
     document.removeEventListener('pointermove', onMove, true);
     document.removeEventListener('pointerup', onUp, true);
+    document.removeEventListener('pointercancel', onUp, true);
     try {
       if (chrome.storage && chrome.storage.local) {
         const r = box.getBoundingClientRect();
@@ -195,17 +196,22 @@
     dy = e.clientY - box.offsetTop;
     document.addEventListener('pointermove', onMove, true);
     document.addEventListener('pointerup', onUp, true);
+    // 触屏/指针被浏览器取消时 pointerup 不会触发，不重置会出现"幽灵拖动"
+    document.addEventListener('pointercancel', onUp, true);
   });
 
   // ============== 心跳保活 SW（jitter 22-28s 随机化）==============
   function schedulePing() {
     const jitter = 22000 + Math.random() * 6000;
     setTimeout(() => {
-      try {
-        if (chrome.runtime?.id) {
-          chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
-        }
-      } catch {}
+      // 隐藏时跳过：省电减少 SW 唤醒；seq 已用时间戳，SW 重启后首条消息会自行唤醒它
+      if (!document.hidden) {
+        try {
+          if (chrome.runtime?.id) {
+            chrome.runtime.sendMessage({ type: 'ping' }).catch(() => {});
+          }
+        } catch {}
+      }
       schedulePing();
     }, jitter);
   }
@@ -299,9 +305,17 @@
 
   // ============== 监听 inject.js (MAIN world) 通过随机事件名传来的响应体 ==============
   // inject.js 已通过 setPano hook 过滤反作弊注入的假响应，仅放行 panoId 匹配的真实响应
+  // 事件名本身可被页面从 <html data-v> 读出后伪造：这里再加结构校验 + 限速抬高伪造成本
+  let _fwdN = 0, _fwdT = 0;
   window.addEventListener(EVT, (e) => {
     try {
-      const { url, body } = e.detail;
+      const { url, body } = e.detail || {};
+      if (typeof url !== 'string' || typeof body !== 'string') return;
+      if (!/GetMetadata|getPanoInfo|getQQPanoInfo/.test(url)) return;
+      if (!body || body.length > 5000000) return;
+      const now = Date.now();
+      if (now - _fwdT > 10000) { _fwdT = now; _fwdN = 0; }
+      if (++_fwdN > 20) return; // 10s 内超 20 条视为风暴/伪造
       chrome.runtime.sendMessage({ type: 'streetview', url, body }).catch(() => {});
     } catch (err) {}
   });

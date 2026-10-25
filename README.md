@@ -189,6 +189,10 @@ v8.1 已修复多局复用问题；v8.4 修复了混源对局（Google 之后接
 
 如果 Geo Helper 帮到了你，欢迎点一个 ⭐ [Star](https://github.com/a1175815821/geo-helper/stargazers) —— 这是对持续维护最大的鼓励。遇到问题请提 [Issue](https://github.com/a1175815821/geo-helper/issues)，附上悬浮窗底部来源标识与控制台报错（开启 `__GEO_DEBUG__` 后重现）。
 
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=a1175815821/geo-helper&type=Date)](https://star-history.com/#a1175815821/geo-helper&Date)
+
 ## License
 
 [MIT](LICENSE)
